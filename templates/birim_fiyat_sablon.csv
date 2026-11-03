@@ -1,0 +1,13 @@
+﻿poz_no;kalem;birim;birim_fiyat
+KT.100;Kablo tavası 100x40 t=2;m;0
+KT.200;Kablo tavası 200x40 t=2;m;0
+KT.300;Kablo tavası 300x40 t=2;m;0
+EP.YD100;Yatay dönüş (YD) 100;adet;0
+EP.YD200;Yatay dönüş (YD) 200;adet;0
+EP.YT100;Yatay T (YT) 100;adet;0
+EP.YT200;Yatay T (YT) 200;adet;0
+EP.YY100;Yarım T 100;adet;0
+EP.YY200;Yarım T 200;adet;0
+EP.AD100;Haç (AD) 100;adet;0
+EP.AD200;Haç (AD) 200;adet;0
+E.400;Hat uzunluğu;m;0

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" ProductType="Application" Name="AutoCAD AI Designer"
+  Description="Doğal dille çizim önerileri: önizleme, onay ve tek adımda geri alma."
+  AppVersion="4.0.0" Author="" AutodeskProduct="AutoCAD"
+  ProductCode="{6D0F1A52-3B7C-4E94-A1B8-5C2E9F4D7A10}" UpgradeCode="{9A4C7E21-58D3-4B6F-8E0A-1F3B5D7C9E42}">
+  <CompanyDetails Name="" />
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R24.1" SeriesMax="R24.1" />
+    <ComponentEntry AppName="CadAiDesigner" Version="4.0.0" ModuleName="./Contents/CadAiDesigner.dll"
+      AppDescription="AutoCAD AI Designer" LoadOnAutoCADStartup="True" LoadOnCommandInvocation="True">
+      <Commands GroupName="CADAI">
+        <Command Local="AIDESIGNER" Global="AIDESIGNER" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>

@@ -1,0 +1,5 @@
+autocad/bin/
+autocad/obj/
+__pycache__/
+*.pyc
+.local-token
