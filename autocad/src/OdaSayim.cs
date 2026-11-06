@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -54,6 +54,23 @@ namespace CadAiDesigner
         }
 
         static readonly Dictionary<string, MahalCfg> MahalMem = new Dictionary<string, MahalCfg>(StringComparer.OrdinalIgnoreCase);
+
+        const string OdaNodKey = "CADAI_ODA";
+        const string WallLayersRec = "WALL_LAYERS";
+
+        /// <summary>Optional wall-layer allow-list and exclude-list (NOD XRecord, per drawing).</summary>
+        class WallLayerCfg
+        {
+            public List<string> Include = new List<string>();
+            public List<string> Exclude = new List<string>();
+            public bool HasInclude { get { return Include != null && Include.Count > 0; } }
+            public override string ToString()
+            {
+                string a = HasInclude ? ("duvar=" + string.Join(",", Include.Take(8))) : "duvar=otomatik";
+                if (Exclude != null && Exclude.Count > 0) a += " haric=" + string.Join(",", Exclude.Take(8));
+                return a;
+            }
+        }
 
         static string MemKey(Document doc)
         {
@@ -174,6 +191,7 @@ namespace CadAiDesigner
                 MahalCfg cfg;
                 if (!AskMahalCfg(ed, db, doc, force, out cfg)) return;
                 double gap = ResolveGap(ed, db, doc, force);
+                if (!AskWallLayerCfg(ed, db, doc, force)) return;
 
                 PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nPlan\u0131 se\u00e7in (oda etiketleri, \u00e7izgiler): " });
                 if (sr.Status != PromptStatus.OK) return;
@@ -329,6 +347,7 @@ namespace CadAiDesigner
                 MahalCfg cfg;
                 if (!AskMahalCfg(ed, db, doc, false, out cfg)) return;
                 double gap = ResolveGap(ed, db, doc, false);
+                if (!AskWallLayerCfg(ed, db, doc, false)) return;
 
                 PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nPlan\u0131 se\u00e7in (oda etiketleri, \u00e7izgiler, bloklar): " });
                 if (sr.Status != PromptStatus.OK) return;
@@ -417,6 +436,7 @@ namespace CadAiDesigner
             MahalCfg cfg;
             if (!AskMahalCfg(ed, db, doc, true, out cfg)) return false;
             double gap = ResolveGap(ed, db, doc, true);
+            if (!AskWallLayerCfg(ed, db, doc, true)) return false;
 
             bool outCol = false;
             if (!buildingId.IsNull)
@@ -514,7 +534,8 @@ namespace CadAiDesigner
             blocks = new List<BlockReference>();
             labelIds = new HashSet<ObjectId>();
             double minLen = Math.Max(1.0, ArmaturCommands.MmPublic(db)); // skip <~1mm scraps
-            int nWall = 0, nSkip = 0, nIns = 0;
+            int nWall = 0, nSkip = 0, nIns = 0, nAxis = 0, nLayEx = 0, nNotAllow = 0;
+            WallLayerCfg wallCfg = LoadWallLayers(tx, db);
 
             Prog(ed, pm, "Tarama: " + ids.Length + " nesne...");
             if (CheckCancel()) { rooms = new List<Room>(); missing = new List<string>(); if (pm != null) pm.Stop(); return; }
@@ -577,6 +598,14 @@ namespace CadAiDesigner
                 else if (dxf == "LINE" || dxf == "ARC" || dxf == "LWPOLYLINE" || dxf == "POLYLINE")
                 {
                     if (string.Equals(ent.Layer, SinirLayer, StringComparison.OrdinalIgnoreCase)) continue;
+                    int skipWhy;
+                    if (SkipWallEntity(tx, db, ent, wallCfg, out skipWhy))
+                    {
+                        if (skipWhy == 1) nAxis++;
+                        else if (skipWhy == 2) nLayEx++;
+                        else if (skipWhy == 3) nNotAllow++;
+                        continue;
+                    }
                     Curve c = ent as Curve;
                     if (c != null && ArmaturCommands.IsClosedPublic(c)) closedPl.Add(id);
                     int before = segs.Count;
@@ -585,7 +614,9 @@ namespace CadAiDesigner
                 }
             }
 
-            Prog(ed, pm, "Duvar: " + segs.Count + " segment, etiket: " + labels.Count + " (atlanan " + nSkip + ", " + sw.ElapsedMilliseconds + " ms)");
+            Prog(ed, pm, "Duvar: " + segs.Count + " segment, etiket: " + labels.Count
+                + " (dxf-atlanan " + nSkip + ", aks " + nAxis + ", haric " + nLayEx + ", allow-disi " + nNotAllow
+                + ", " + sw.ElapsedMilliseconds + " ms)");
             if (CheckCancel()) { rooms = new List<Room>(); missing = new List<string>(); if (pm != null) pm.Stop(); return; }
 
             rooms = new List<Room>();
@@ -738,6 +769,38 @@ namespace CadAiDesigner
                         }
                         k++;
                     }
+                    // long axis (AKS) lines crossing many rooms — auto-excluded
+                    try
+                    {
+                        try { db.LoadLineTypeFile("CENTER", "acad.lin"); } catch (System.Exception) { }
+                        LayerTable ltAbs = (LayerTable)tx.GetObject(db.LayerTableId, OpenMode.ForWrite);
+                        if (!ltAbs.Has("A-AKS"))
+                        {
+                            LayerTableRecord ltr = new LayerTableRecord { Name = "A-AKS" };
+                            try
+                            {
+                                LinetypeTable ltt = (LinetypeTable)tx.GetObject(db.LinetypeTableId, OpenMode.ForRead);
+                                if (ltt.Has("CENTER")) ltr.LinetypeObjectId = ltt["CENTER"];
+                            }
+                            catch (System.Exception) { }
+                            ltAbs.Add(ltr); tx.AddNewlyCreatedDBObject(ltr, true);
+                        }
+                    }
+                    catch (System.Exception) { }
+                    for (int ai = 0; ai <= nx; ai += 5)
+                    {
+                        Line aks = new Line(new Point3d(ai * w, -h, 0), new Point3d(ai * w, (ny + 1) * h, 0));
+                        aks.Layer = "A-AKS";
+                        try { aks.Linetype = "CENTER"; } catch (System.Exception) { }
+                        add(aks);
+                    }
+                    for (int aj = 0; aj <= ny; aj += 5)
+                    {
+                        Line aks = new Line(new Point3d(-w, aj * h, 0), new Point3d((nx + 1) * w, aj * h, 0));
+                        aks.Layer = "A-AKS";
+                        try { aks.Linetype = "CENTER"; } catch (System.Exception) { }
+                        add(aks);
+                    }
                     tx.Commit();
                 }
                 ed.WriteMessage("\nOSINIRBENCH: " + ids.Count + " nesne olusturuldu (" + swAll.ElapsedMilliseconds + " ms). DetectRooms...\n");
@@ -751,9 +814,278 @@ namespace CadAiDesigner
                 }
                 ed.WriteMessage("\nOSINIRBENCH SONUC: nesne=" + ids.Count + " oda=" + rooms.Count
                     + " toplam_ms=" + swAll.ElapsedMilliseconds + "\n");
+
+                // focused 2x2 rooms + crossing AKS (must not shatter rooms)
+                using (doc.LockDocument())
+                using (Transaction tx = db.TransactionManager.StartTransaction())
+                {
+                    BlockTableRecord space = (BlockTableRecord)tx.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                    List<ObjectId> ids2 = new List<ObjectId>();
+                    Action<Entity> add2 = ent => { space.AppendEntity(ent); tx.AddNewlyCreatedDBObject(ent, true); ids2.Add(ent.ObjectId); };
+                    double s = 5000;
+                    double ox = 100000, oy = 100000;
+                    add2(new Line(new Point3d(ox, oy, 0), new Point3d(ox + 2 * s, oy, 0)));
+                    add2(new Line(new Point3d(ox, oy + s, 0), new Point3d(ox + 2 * s, oy + s, 0)));
+                    add2(new Line(new Point3d(ox, oy + 2 * s, 0), new Point3d(ox + 2 * s, oy + 2 * s, 0)));
+                    add2(new Line(new Point3d(ox, oy, 0), new Point3d(ox, oy + 2 * s, 0)));
+                    add2(new Line(new Point3d(ox + s, oy, 0), new Point3d(ox + s, oy + 2 * s, 0)));
+                    add2(new Line(new Point3d(ox + 2 * s, oy, 0), new Point3d(ox + 2 * s, oy + 2 * s, 0)));
+                    for (int i = 0; i < 4; i++)
+                    {
+                        DBText lab = new DBText();
+                        lab.Position = new Point3d(ox + (i % 2) * s + s * 0.5, oy + (i / 2) * s + s * 0.5, 0);
+                        lab.Height = 200; lab.TextString = "R" + (i + 1); add2(lab);
+                    }
+                    Line ax1 = new Line(new Point3d(ox - s, oy + s, 0), new Point3d(ox + 3 * s, oy + s, 0));
+                    ax1.Layer = "A-AKS"; try { ax1.Linetype = "CENTER"; } catch (System.Exception) { } add2(ax1);
+                    Line ax2 = new Line(new Point3d(ox + s, oy - s, 0), new Point3d(ox + s, oy + 3 * s, 0));
+                    ax2.Layer = "A-AKS"; try { ax2.Linetype = "CENTER"; } catch (System.Exception) { } add2(ax2);
+                    List<Room> rooms2; List<string> miss2;
+                    DetectRooms(ed, tx, db, ids2.ToArray(), null, gap, traced, out rooms2, out miss2);
+                    ed.WriteMessage("\nOSINIRAKS: 2x2+aks -> oda=" + rooms2.Count + " (beklenen ~4)\n");
+                    tx.Commit();
+                }
             }
             catch (System.Exception ex) { ed.WriteMessage("\nOSINIRBENCH hata: " + ex.Message + "\n"); }
             finally { foreach (DBObjectCollection col in traced) foreach (DBObject o in col) { try { o.Dispose(); } catch (System.Exception) { } } }
+        }
+
+
+        static bool LayerNameLooksAxis(string layer)
+        {
+            string n = TrayKesif.Norm(layer ?? "");
+            if (n.Length == 0) return false;
+            return n.Contains("aks") || n.Contains("axis") || n.Contains("grid") || n.Contains("eksen");
+        }
+
+        static bool LinetypeLooksAxis(string lt)
+        {
+            string n = TrayKesif.Norm(lt ?? "");
+            if (n.Length == 0) return false;
+            if (n == "continuous" || n == "bylayer" || n == "byblock") return false;
+            if (n.Contains("center") || n.Contains("centre")) return true;
+            if (n.Contains("dashdot")) return true;
+            if (n.Contains("aks") || n.Contains("axis") || n.Contains("eksen") || n.Contains("grid")) return true;
+            if (n.Contains("iso04") || n.Contains("iso05") || n.Contains("iso07")) return true;
+            if (n.Contains("phantom") || n == "dot" || n.StartsWith("dot")) return true;
+            return false;
+        }
+
+        static string EffectiveLinetypeName(Transaction tx, Database db, Entity ent)
+        {
+            try
+            {
+                string raw = ent.Linetype ?? "";
+                if (string.Equals(raw, "ByLayer", StringComparison.OrdinalIgnoreCase)
+                    || ent.LinetypeId == db.ByLayerLinetype)
+                {
+                    LayerTableRecord ltr = (LayerTableRecord)tx.GetObject(ent.LayerId, OpenMode.ForRead);
+                    LinetypeTableRecord rec = (LinetypeTableRecord)tx.GetObject(ltr.LinetypeObjectId, OpenMode.ForRead);
+                    return rec.Name ?? "";
+                }
+                if (string.Equals(raw, "ByBlock", StringComparison.OrdinalIgnoreCase)
+                    || ent.LinetypeId == db.ByBlockLinetype)
+                    return "Continuous";
+                if (!string.IsNullOrEmpty(raw)) return raw;
+                if (!ent.LinetypeId.IsNull)
+                {
+                    LinetypeTableRecord rec = (LinetypeTableRecord)tx.GetObject(ent.LinetypeId, OpenMode.ForRead);
+                    return rec.Name ?? "";
+                }
+            }
+            catch (System.Exception) { }
+            return "Continuous";
+        }
+
+        /// <summary>skipWhy: 1=auto aks, 2=hariç list, 3=not in duvar allow-list.</summary>
+        static bool SkipWallEntity(Transaction tx, Database db, Entity ent, WallLayerCfg cfg, out int skipWhy)
+        {
+            skipWhy = 0;
+            string layer = ent.Layer ?? "";
+            if (cfg != null && cfg.Exclude != null)
+            {
+                foreach (string x in cfg.Exclude)
+                    if (string.Equals(x, layer, StringComparison.OrdinalIgnoreCase)) { skipWhy = 2; return true; }
+            }
+            if (cfg != null && cfg.HasInclude)
+            {
+                bool ok = false;
+                foreach (string x in cfg.Include)
+                    if (string.Equals(x, layer, StringComparison.OrdinalIgnoreCase)) { ok = true; break; }
+                if (!ok) { skipWhy = 3; return true; }
+                return false;
+            }
+            if (LayerNameLooksAxis(layer) && LinetypeLooksAxis(EffectiveLinetypeName(tx, db, ent)))
+            { skipWhy = 1; return true; }
+            return false;
+        }
+
+        static List<string> SplitLayerList(string s)
+        {
+            List<string> r = new List<string>();
+            if (string.IsNullOrWhiteSpace(s)) return r;
+            foreach (string part in s.Split(new[] { '|', ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string x = part.Trim();
+                if (x.Length == 0) continue;
+                if (!r.Any(y => string.Equals(y, x, StringComparison.OrdinalIgnoreCase))) r.Add(x);
+            }
+            return r;
+        }
+
+        static WallLayerCfg LoadWallLayers(Transaction tx, Database db)
+        {
+            WallLayerCfg cfg = new WallLayerCfg();
+            try
+            {
+                DBDictionary nod = (DBDictionary)tx.GetObject(db.NamedObjectsDictionaryId, OpenMode.ForRead);
+                if (!nod.Contains(OdaNodKey)) return cfg;
+                DBDictionary d = tx.GetObject(nod.GetAt(OdaNodKey), OpenMode.ForRead) as DBDictionary;
+                if (d == null || !d.Contains(WallLayersRec)) return cfg;
+                Xrecord xr = tx.GetObject(d.GetAt(WallLayersRec), OpenMode.ForRead) as Xrecord;
+                if (xr == null || xr.Data == null) return cfg;
+                foreach (TypedValue tv in xr.Data)
+                {
+                    if (tv.TypeCode != (int)DxfCode.Text || tv.Value == null) continue;
+                    string s = Convert.ToString(tv.Value) ?? "";
+                    if (s.StartsWith("I|", StringComparison.OrdinalIgnoreCase))
+                        cfg.Include = SplitLayerList(s.Substring(2));
+                    else if (s.StartsWith("E|", StringComparison.OrdinalIgnoreCase))
+                        cfg.Exclude = SplitLayerList(s.Substring(2));
+                }
+            }
+            catch (System.Exception) { }
+            return cfg;
+        }
+
+        static void SaveWallLayers(Database db, WallLayerCfg cfg)
+        {
+            if (cfg == null) cfg = new WallLayerCfg();
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            using (DocumentLock lk = doc != null ? doc.LockDocument() : null)
+            using (Transaction tx = db.TransactionManager.StartTransaction())
+            {
+                DBDictionary nod = (DBDictionary)tx.GetObject(db.NamedObjectsDictionaryId, OpenMode.ForWrite);
+                DBDictionary d;
+                if (nod.Contains(OdaNodKey))
+                    d = (DBDictionary)tx.GetObject(nod.GetAt(OdaNodKey), OpenMode.ForWrite);
+                else
+                {
+                    d = new DBDictionary();
+                    nod.SetAt(OdaNodKey, d);
+                    tx.AddNewlyCreatedDBObject(d, true);
+                }
+                Xrecord xr;
+                if (d.Contains(WallLayersRec))
+                    xr = (Xrecord)tx.GetObject(d.GetAt(WallLayersRec), OpenMode.ForWrite);
+                else
+                {
+                    xr = new Xrecord();
+                    d.SetAt(WallLayersRec, xr);
+                    tx.AddNewlyCreatedDBObject(xr, true);
+                }
+                string inc = "I|" + string.Join("|", cfg.Include ?? new List<string>());
+                string exc = "E|" + string.Join("|", cfg.Exclude ?? new List<string>());
+                xr.Data = new ResultBuffer(
+                    new TypedValue((int)DxfCode.Text, inc),
+                    new TypedValue((int)DxfCode.Text, exc));
+                tx.Commit();
+            }
+        }
+
+        static HashSet<string> PickLayersFromEntities(Editor ed, string msg)
+        {
+            HashSet<string> layers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = msg });
+            if (sr.Status != PromptStatus.OK) return layers;
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Database db = doc.Database;
+            using (DocumentLock lk = doc.LockDocument())
+            using (Transaction tx = db.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId id in sr.Value.GetObjectIds())
+                {
+                    Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                    if (e != null && !string.IsNullOrEmpty(e.Layer)) layers.Add(e.Layer);
+                }
+                tx.Commit();
+            }
+            return layers;
+        }
+
+        /// <summary>Ayarlar: click wall entities for allow-list / hariç; NOD-persisted. force=false only reports.</summary>
+        static bool AskWallLayerCfg(Editor ed, Database db, Document doc, bool force)
+        {
+            WallLayerCfg cfg;
+            using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
+            {
+                cfg = LoadWallLayers(tx, db);
+                tx.Commit();
+            }
+            if (!force)
+            {
+                ed.WriteMessage("\nDuvar katmanlari (" + cfg + "). Degistirmek icin Ayarlar.\n");
+                return true;
+            }
+
+            PromptKeywordOptions ko = new PromptKeywordOptions(
+                "\nDuvar katmani [Secim/Otomatik] <" + (cfg.HasInclude ? "Secim" : "Otomatik") + ">: ")
+            { AllowNone = true };
+            ko.Keywords.Add("Secim", "Secim", "Se\u00e7im");
+            ko.Keywords.Add("Otomatik", "Otomatik", "Otomatik");
+            ko.Keywords.Default = cfg.HasInclude ? "Secim" : "Otomatik";
+            ko.AppendKeywordsToMessage = true;
+            PromptResult kr = ed.GetKeywords(ko);
+            if (kr.Status == PromptStatus.Cancel) return false;
+            string mode = kr.Status == PromptStatus.OK ? NormKey(kr.StringResult) : (cfg.HasInclude ? "secim" : "otomatik");
+            if (mode.Contains("oto") || mode == "auto")
+            {
+                cfg.Include = new List<string>();
+                ed.WriteMessage("\nDuvar katmani: otomatik (aks otomatik elenir).\n");
+            }
+            else
+            {
+                HashSet<string> picked = PickLayersFromEntities(ed, "\nDuvar ornegi secin (bir/birden fazla nesne): ");
+                if (picked.Count == 0)
+                    ed.WriteMessage("\nDuvar katmani secilmedi; mevcut ayar korundu (" + cfg + ").\n");
+                else
+                {
+                    cfg.Include = picked.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                    ed.WriteMessage("\nDuvar katmanlari: " + string.Join(", ", cfg.Include) + "\n");
+                }
+            }
+
+            PromptKeywordOptions ho = new PromptKeywordOptions(
+                "\nHaric katman [Secim/Yok] <" + ((cfg.Exclude != null && cfg.Exclude.Count > 0) ? "Secim" : "Yok") + ">: ")
+            { AllowNone = true };
+            ho.Keywords.Add("Secim", "Secim", "Se\u00e7im");
+            ho.Keywords.Add("Yok", "Yok", "Yok");
+            ho.Keywords.Default = (cfg.Exclude != null && cfg.Exclude.Count > 0) ? "Secim" : "Yok";
+            ho.AppendKeywordsToMessage = true;
+            PromptResult hr = ed.GetKeywords(ho);
+            if (hr.Status == PromptStatus.Cancel) return false;
+            string hm = hr.Status == PromptStatus.OK ? NormKey(hr.StringResult) : ((cfg.Exclude != null && cfg.Exclude.Count > 0) ? "secim" : "yok");
+            if (hm == "yok" || hm == "none")
+            {
+                cfg.Exclude = new List<string>();
+                ed.WriteMessage("\nHaric katman: yok.\n");
+            }
+            else
+            {
+                HashSet<string> picked = PickLayersFromEntities(ed, "\nHaric tutulacak katman ornegi secin: ");
+                if (picked.Count == 0)
+                    ed.WriteMessage("\nHaric katman secilmedi; mevcut ayar korundu.\n");
+                else
+                {
+                    cfg.Exclude = picked.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                    ed.WriteMessage("\nHaric katmanlar: " + string.Join(", ", cfg.Exclude) + "\n");
+                }
+            }
+
+            try { SaveWallLayers(db, cfg); }
+            catch (System.Exception ex) { ed.WriteMessage("\nKatman ayari kaydedilemedi: " + ex.Message + "\n"); }
+            ed.WriteMessage("\nKaydedildi (cizim NOD): " + cfg + "\n");
+            return true;
         }
 
         /// <summary>Ask for mahal label block + name/number tags; remember per drawing. Enter = automatic (heuristics). force=true always re-asks (Ayarlar).</summary>
