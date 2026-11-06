@@ -79,6 +79,163 @@ namespace CadAiDesigner
         [CommandMethod("OSAY", CommandFlags.Modal | CommandFlags.NoBlockEditor)]
         public void RunShort() { Do(); }
 
+        [CommandMethod("AIDODASINIR", CommandFlags.Modal | CommandFlags.NoBlockEditor)]
+        public void RunSinir() { DoSinir(); }
+
+        [CommandMethod("OSINIR", CommandFlags.Modal | CommandFlags.NoBlockEditor)]
+        public void RunSinirShort() { DoSinir(); }
+
+        const string SinirLayer = "A_ODA_SINIR";
+        const string SinirRegApp = "CADAI_ODA";
+
+        static void DoSinir()
+        {
+            Document doc = Application.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+            Editor ed = doc.Editor; Database db = doc.Database;
+            List<DBObjectCollection> traced = new List<DBObjectCollection>();
+            try
+            {
+                PromptKeywordOptions mo = new PromptKeywordOptions("\nPlan\u0131 se\u00e7in (pencere) veya [Ayarlar] <Se\u00e7im>: ") { AllowNone = true };
+                mo.Keywords.Add("Secim", "Secim", "Se\u00e7im");
+                mo.Keywords.Add("Ayarlar", "Ayarlar", "Ayarlar");
+                mo.Keywords.Default = "Secim"; mo.AppendKeywordsToMessage = true;
+                PromptResult mr = ed.GetKeywords(mo);
+                if (mr.Status == PromptStatus.Cancel) return;
+                string mode = mr.Status == PromptStatus.OK ? NormKey(mr.StringResult) : "secim";
+                bool force = mode == "ayarlar" || mode == "ayarlari" || mode == "ayar";
+
+                MahalCfg cfg;
+                if (!AskMahalCfg(ed, db, doc, force, out cfg)) return;
+                double gap = ResolveGap(ed, db, doc, force);
+
+                PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nPlan\u0131 se\u00e7in (oda etiketleri, \u00e7izgiler): " });
+                if (sr.Status != PromptStatus.OK) return;
+                ObjectId[] ids = sr.Value.GetObjectIds();
+
+                int drawn = 0, skipped = 0;
+                List<string> missing;
+                List<string> drawnNames = new List<string>();
+                using (doc.LockDocument())
+                using (Transaction tx = db.TransactionManager.StartTransaction())
+                {
+                    List<Room> rooms;
+                    DetectRooms(ed, tx, db, ids, cfg, gap, traced, out rooms, out missing);
+                    EnsureSinirLayer(tx, db);
+                    BlockTableRecord space = (BlockTableRecord)tx.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
+                    List<List<Point2d>> existing = ExistingClosed(tx, db, ids);
+                    HashSet<string> existingNames = ExistingSinirNames(tx, db);
+                    double nodeTol = Math.Max(SnapTol, Math.Min(gap * 0.05, 50 * ArmaturCommands.MmPublic(db)));
+                    foreach (Room r in rooms)
+                    {
+                        if ((!string.IsNullOrEmpty(r.Name) && existingNames.Contains(r.Name)) || HasSameBoundary(existing, r, nodeTol)) { skipped++; continue; }
+                        Polyline pl = new Polyline();
+                        pl.SetDatabaseDefaults(db);
+                        pl.Layer = SinirLayer;
+                        for (int i = 0; i < r.Poly.Count; i++) pl.AddVertexAt(i, r.Poly[i], 0, 0, 0);
+                        pl.Closed = true;
+                        space.AppendEntity(pl); tx.AddNewlyCreatedDBObject(pl, true);
+                        SetRoomXData(tx, db, pl, r.Name ?? "");
+                        drawn++; drawnNames.Add(r.Name ?? ("Oda?"));
+                        existing.Add(r.Poly);
+                    }
+                    tx.Commit();
+                }
+                string msg = "Oda s\u0131n\u0131r\u0131: " + drawn + " polyline \u00e7izildi"
+                    + (skipped > 0 ? ", " + skipped + " atland\u0131 (mevcut)" : "")
+                    + " (katman " + SinirLayer + ", bo\u015fluk " + Fmm(gap, db) + " mm).";
+                if (drawnNames.Count > 0) msg += "\n  " + string.Join(", ", drawnNames.Take(20));
+                if (missing != null && missing.Count > 0) msg += "\n  Bulunamayan: " + string.Join(", ", missing.Take(12));
+                ed.WriteMessage("\n" + msg + "\n");
+                try { Metraj.Raise(msg); } catch (System.Exception) { }
+            }
+            catch (System.Exception ex) { ed.WriteMessage("\nOda s\u0131n\u0131r\u0131 hatas\u0131: " + ex.Message + "\n"); }
+            finally { foreach (DBObjectCollection col in traced) foreach (DBObject o in col) { try { o.Dispose(); } catch (System.Exception) { } } }
+        }
+
+        static void EnsureSinirLayer(Transaction tx, Database db)
+        {
+            LayerTable lt = (LayerTable)tx.GetObject(db.LayerTableId, OpenMode.ForRead);
+            if (lt.Has(SinirLayer)) return;
+            lt.UpgradeOpen();
+            LayerTableRecord ltr = new LayerTableRecord { Name = SinirLayer };
+            ltr.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByAci, 3); // green
+            lt.Add(ltr); tx.AddNewlyCreatedDBObject(ltr, true);
+        }
+
+        static void SetRoomXData(Transaction tx, Database db, Entity ent, string name)
+        {
+            try
+            {
+                RegAppTable rat = (RegAppTable)tx.GetObject(db.RegAppTableId, OpenMode.ForRead);
+                if (!rat.Has(SinirRegApp))
+                {
+                    rat.UpgradeOpen();
+                    RegAppTableRecord r = new RegAppTableRecord { Name = SinirRegApp };
+                    rat.Add(r); tx.AddNewlyCreatedDBObject(r, true);
+                }
+                ResultBuffer rb = new ResultBuffer(
+                    new TypedValue(1001, SinirRegApp),
+                    new TypedValue(1000, name ?? ""));
+                ent.XData = rb;
+            }
+            catch (System.Exception) { }
+        }
+
+        static HashSet<string> ExistingSinirNames(Transaction tx, Database db)
+        {
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            BlockTableRecord space = (BlockTableRecord)tx.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            foreach (ObjectId id in space)
+            {
+                if (id.ObjectClass.DxfName != "LWPOLYLINE" && id.ObjectClass.DxfName != "POLYLINE") continue;
+                Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                if (e == null || !string.Equals(e.Layer, SinirLayer, StringComparison.OrdinalIgnoreCase)) continue;
+                ResultBuffer rb = e.GetXDataForApplication(SinirRegApp);
+                if (rb == null) continue;
+                foreach (TypedValue tv in rb) if (tv.TypeCode == 1000 && tv.Value != null) { names.Add(Convert.ToString(tv.Value)); break; }
+            }
+            return names;
+        }
+
+        static List<List<Point2d>> ExistingClosed(Transaction tx, Database db, ObjectId[] sel)
+        {
+            List<List<Point2d>> r = new List<List<Point2d>>();
+            HashSet<ObjectId> seen = new HashSet<ObjectId>();
+            Action<ObjectId> add = id =>
+            {
+                if (!seen.Add(id)) return;
+                Curve c = tx.GetObject(id, OpenMode.ForRead) as Curve;
+                if (c == null || !ArmaturCommands.IsClosedPublic(c)) return;
+                List<Point2d> poly = ArmaturCommands.SamplePublic(c);
+                if (poly.Count >= 3) r.Add(poly);
+            };
+            foreach (ObjectId id in sel) add(id);
+            // also current space closed polys on sinir layer
+            BlockTableRecord space = (BlockTableRecord)tx.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            foreach (ObjectId id in space)
+            {
+                if (id.ObjectClass.DxfName != "LWPOLYLINE" && id.ObjectClass.DxfName != "POLYLINE") continue;
+                Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                if (e == null) continue;
+                if (!string.Equals(e.Layer, SinirLayer, StringComparison.OrdinalIgnoreCase)) continue;
+                add(id);
+            }
+            return r;
+        }
+
+        static bool HasSameBoundary(List<List<Point2d>> existing, Room room, double tol)
+        {
+            Point2d c = Centroid(room.Poly);
+            foreach (List<Point2d> ex in existing)
+            {
+                double a = AbsArea(ex);
+                if (Math.Abs(a - room.Area) / Math.Max(a, room.Area) > 0.08) continue;
+                if (ArmaturGeo.Inside(ex, c) && ArmaturGeo.Inside(room.Poly, Centroid(ex))) return true;
+            }
+            return false;
+        }
+
         static void Do()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
@@ -246,11 +403,40 @@ namespace CadAiDesigner
         static void BuildFromSelection(Editor ed, Transaction tx, Database db, ObjectId[] ids,
             bool withVis, MahalCfg cfg, double gap, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits, out List<string> missing)
         {
+            List<BlockReference> blocks;
+            HashSet<ObjectId> labelIds;
+            DetectRooms(ed, tx, db, ids, cfg, gap, traced, out rooms, out missing, out blocks, out labelIds);
+            hits = new List<Hit>();
+            foreach (BlockReference br in blocks)
+            {
+                if (labelIds.Contains(br.ObjectId)) continue;
+                if (cfg != null && !string.IsNullOrEmpty(cfg.BlockName) && string.Equals(EffName(tx, br), cfg.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
+                Point2d p = new Point2d(br.Position.X, br.Position.Y);
+                int ri = -1;
+                for (int i = 0; i < rooms.Count; i++)
+                    if (ArmaturGeo.Inside(rooms[i].Poly, p)) { ri = i; break; }
+                if (ri < 0) continue;
+                hits.Add(new Hit { Key = BlockKey(tx, br, withVis), P = p, Room = ri });
+            }
+            hits = Dedupe(hits);
+        }
+
+        static void DetectRooms(Editor ed, Transaction tx, Database db, ObjectId[] ids, MahalCfg cfg, double gap,
+            List<DBObjectCollection> traced, out List<Room> rooms, out List<string> missing)
+        {
+            List<BlockReference> blocks; HashSet<ObjectId> labelIds;
+            DetectRooms(ed, tx, db, ids, cfg, gap, traced, out rooms, out missing, out blocks, out labelIds);
+        }
+
+        static void DetectRooms(Editor ed, Transaction tx, Database db, ObjectId[] ids, MahalCfg cfg, double gap,
+            List<DBObjectCollection> traced, out List<Room> rooms, out List<string> missing,
+            out List<BlockReference> blocks, out HashSet<ObjectId> labelIds)
+        {
             List<ObjectId> closedPl = new List<ObjectId>();
             List<object> segs = new List<object>();
             List<Label> labels = new List<Label>();
-            List<BlockReference> blocks = new List<BlockReference>();
-            HashSet<ObjectId> labelIds = new HashSet<ObjectId>();
+            blocks = new List<BlockReference>();
+            labelIds = new HashSet<ObjectId>();
 
             foreach (ObjectId id in ids)
             {
@@ -263,11 +449,10 @@ namespace CadAiDesigner
                     if (br == null) continue;
                     string bn = EffName(tx, br);
                     bool pinned = cfg != null && !string.IsNullOrEmpty(cfg.BlockName);
-                    bool isLabelBlk = pinned && string.Equals(bn, cfg.BlockName, StringComparison.OrdinalIgnoreCase);
                     string mahal; double pri;
                     if (pinned)
                     {
-                        if (isLabelBlk)
+                        if (string.Equals(bn, cfg.BlockName, StringComparison.OrdinalIgnoreCase))
                         {
                             labelIds.Add(id);
                             if (TryMahalLabel(tx, br, cfg, out mahal, out pri) && mahal != null)
@@ -294,8 +479,11 @@ namespace CadAiDesigner
                 else if (dxf == "LWPOLYLINE" || dxf == "POLYLINE" || dxf == "CIRCLE")
                 {
                     Curve c = ent as Curve;
-                    if (c != null && ArmaturCommands.IsClosedPublic(c)) closedPl.Add(id);
-                    CollectEdges(ent, segs);
+                    // skip our own room-boundary layer so re-runs do not swallow faces
+                    if (c != null && ArmaturCommands.IsClosedPublic(c) && !string.Equals(ent.Layer, SinirLayer, StringComparison.OrdinalIgnoreCase))
+                        closedPl.Add(id);
+                    if (!string.Equals(ent.Layer, SinirLayer, StringComparison.OrdinalIgnoreCase))
+                        CollectEdges(ent, segs);
                 }
                 else if (dxf == "LINE" || dxf == "ARC" || dxf == "SPLINE")
                     CollectEdges(ent, segs);
@@ -314,11 +502,10 @@ namespace CadAiDesigner
             List<object> closedSegs = CloseGaps(segs, gap);
             foreach (List<Point2d> f in FindFaces(closedSegs, nodeTol)) AddUniqueRoom(rooms, f);
 
-            // TraceBoundary (HPGAPTOL=gap) for labels not yet inside a room
             object oldGap = null;
             try
             {
-                try { oldGap = Autodesk.AutoCAD.ApplicationServices.Application.GetSystemVariable("HPGAPTOL"); Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("HPGAPTOL", gap); } catch (System.Exception) { oldGap = null; }
+                try { oldGap = Application.GetSystemVariable("HPGAPTOL"); Application.SetSystemVariable("HPGAPTOL", gap); } catch (System.Exception) { oldGap = null; }
                 foreach (Label lb in labels.OrderByDescending(l => l.Pri))
                 {
                     if (rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P))) continue;
@@ -330,10 +517,9 @@ namespace CadAiDesigner
             }
             finally
             {
-                if (oldGap != null) try { Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("HPGAPTOL", oldGap); } catch (System.Exception) { }
+                if (oldGap != null) try { Application.SetSystemVariable("HPGAPTOL", oldGap); } catch (System.Exception) { }
             }
 
-            // ray-cast fallback from each remaining label
             List<Point2d[]> segArr = closedSegs.Select(o => (Point2d[])o).ToList();
             foreach (Label lb in labels)
             {
@@ -351,20 +537,6 @@ namespace CadAiDesigner
                 if (!string.IsNullOrEmpty(lb.Name) && !rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P)))
                     if (!missing.Contains(lb.Name)) missing.Add(lb.Name);
             rooms = rooms.OrderBy(r => r.Area).ToList();
-
-            hits = new List<Hit>();
-            foreach (BlockReference br in blocks)
-            {
-                if (labelIds.Contains(br.ObjectId)) continue;
-                if (cfg != null && !string.IsNullOrEmpty(cfg.BlockName) && string.Equals(EffName(tx, br), cfg.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
-                Point2d p = new Point2d(br.Position.X, br.Position.Y);
-                int ri = -1;
-                for (int i = 0; i < rooms.Count; i++)
-                    if (ArmaturGeo.Inside(rooms[i].Poly, p)) { ri = i; break; }
-                if (ri < 0) continue;
-                hits.Add(new Hit { Key = BlockKey(tx, br, withVis), P = p, Room = ri });
-            }
-            hits = Dedupe(hits);
         }
 
         /// <summary>Ask for mahal label block + name/number tags; remember per drawing. Enter = automatic (heuristics). force=true always re-asks (Ayarlar).</summary>
@@ -600,7 +772,9 @@ namespace CadAiDesigner
             List<Point2d[]> S = segs.Select(o => (Point2d[])o).Where(ab => ab[0].GetDistanceTo(ab[1]) > 1e-6).Select(ab => new[] { ab[0], ab[1] }).ToList();
             if (S.Count == 0) return new List<object>();
             double tol = Math.Max(gap, SnapTol);
-            double near = Math.Max(SnapTol, Math.Min(tol * 0.08, 100 * 1)); // nearly-coincident only (not whole doors)
+            double near = Math.Max(SnapTol, Math.Min(tol * 0.08, 100)); // nearly-coincident only
+            // T-junction / stub shortenings are typically << door width; keep below span to next cross-wall
+            double tJoin = Math.Min(tol, Math.Max(near * 4, tol * 0.55));
 
             // A) extend along segment direction to hit another segment (near-miss / short of crossing)
             for (int i = 0; i < S.Count; i++)
@@ -616,16 +790,20 @@ namespace CadAiDesigner
                         if (j == i) continue;
                         Point2d a = S[j][0], b = S[j][1];
                         Vector2d s = b - a; double den = dir.X * s.Y - dir.Y * s.X;
-                        if (Math.Abs(den) < 1e-12) continue;
+                        if (Math.Abs(den) < 1e-12) continue; // parallel/collinear: door gaps use bridge, not extend
+                        // only T-junction / crossing (not continuing along same wall through a door)
+                        double sl = s.Length; if (sl < 1e-12) continue;
+                        Vector2d sn = s / sl;
+                        if (Math.Abs(dir.X * sn.Y - dir.Y * sn.X) < 0.35) continue;
                         double t = ((a.X - p.X) * s.Y - (a.Y - p.Y) * s.X) / den;
                         double u = ((a.X - p.X) * dir.Y - (a.Y - p.Y) * dir.X) / den;
-                        if (t < 1e-6 || t > tol) continue;
+                        if (t < 1e-6 || t > tJoin) continue;
                         if (u < -0.02 || u > 1.02) continue;
                         u = Math.Max(0, Math.Min(1, u));
                         Point2d ip = a + s * u;
                         if (t < bestT) { bestT = t; bestP = ip; }
                     }
-                    if (bestT <= tol) S[i][e] = bestP;
+                    if (bestT <= tJoin) S[i][e] = bestP;
                 }
             }
 
@@ -637,7 +815,7 @@ namespace CadAiDesigner
                 for (int e = 0; e < 2; e++)
                 {
                     Point2d p = S[i][e];
-                    double best = tol; Point2d foot = p; bool hit = false;
+                    double best = tJoin; Point2d foot = p; bool hit = false;
                     for (int j = 0; j < S.Count; j++)
                     {
                         if (j == i) continue;
@@ -646,7 +824,7 @@ namespace CadAiDesigner
                         Vector2d dj = ab / Math.Sqrt(l2);
                         if (Math.Abs(di.X * dj.Y - di.Y * dj.X) < 0.15) continue; // skip collinear (doors handled below)
                         double tt = (p - a).DotProduct(ab) / l2;
-                        double pad = tol / Math.Sqrt(l2);
+                        double pad = tJoin / Math.Sqrt(l2);
                         if (tt < -pad || tt > 1 + pad) continue;
                         tt = Math.Max(0, Math.Min(1, tt));
                         Point2d fpt = a + ab * tt;

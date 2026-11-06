@@ -198,3 +198,6 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 - **Duvar boşlukları:** varsayılan 1200 mm (birime göre ölçeklenir; Ayarlar’da değişir). Kapı açıklıklarını köprüler, T-birleşim / kısa kalan uçları uzatır, sonra düzlemsel yüz; yedek TraceBoundary (HPGAPTOL) ve ışın tarama. Bulunamayan odalar raporlanır.
 - Excel: `*_odasayim_*.xlsx`.
 
+## Oda sınırı (AIDODASINIR / OSINIR)
+
+Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
