@@ -194,8 +194,8 @@ Panel: 'ArmatÃ¼r yerleÅimi'. ArmatÃ¼r bloÄunu tÄ±klayÄ±n, aÃ§Ä�
 ## Oda blok sayımı (AIDODASAYIM / OSAY)
 
 Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (tüm plan: çizgi, polyline, yazı, blok).
-- Odalar otomatik: seçimdeki kapalı polyline'lar; etiket (TEXT/MTEXT) konumundan TraceBoundary; TraceBoundary yoksa seçili çizgi/polyline/arc'tan düzlemsel yüz (grid odaları).
-- Etiket adı odaya yazılır (salon1…); etiketsiz ama blok içeren yüzler `Oda n`. Dış/bina ölçeğindeki yüz atılır. Oda dışındaki bloklar (sembol listesi) sayılmaz.
-- Aynı ad + aynı konum (1 birim) bir kez. Xref / title-antet atlanır.
-- `Ayarlar`: eski Polyline / İçnokta + bina sınırı akışı. Excel: `*_odasayim_*.xlsx` (`/xlsx`), satır=blok, sütun=oda, toplamlar.
+- Odalar otomatik: seçimdeki kapalı polyline'lar; düzlemsel yüz (grid); TraceBoundary (mahal etiketi / yazı noktasından).
+- **Oda adı:** önce attribute'lu mahal etiketi bloğu (MAHAL / MAHAL_ADI / ODA / ODA_ADI / ROOM / NAME / AD / ISIM; NO/NUMARA ile birleşir → `101 Salon`); yoksa TEXT/MTEXT. Etiket blokları sayıma dahil edilmez.
+- `Ayarlar`: eski Polyline/İçnokta + bina sınırı; isteğe bağlı mahal etiket bloğu adı (o addaki tüm insert'ler sayımdan çıkar).
+- Excel: `*_odasayim_*.xlsx` (`/xlsx`), satır=blok, sütun=oda, toplamlar. Mükerrer (aynı ad+XY) bir kez; oda dışı (sembol listesi) sayılmaz.
 

@@ -27,6 +27,15 @@ namespace CadAiDesigner
 
         class Hit { public string Key; public Point2d P; public int Room; }
 
+        /// <summary>Room-name candidate: label-block attributes preferred over TEXT/MTEXT (higher Pri).</summary>
+        class Label
+        {
+            public Point2d P; public string Name; public double Pri; public ObjectId BlockId; public string BlockName;
+        }
+
+        static readonly string[] NameTags = { "mahal", "mahaladi", "oda", "odaadi", "room", "name", "ad", "isim", "mekan", "mekanadi" };
+        static readonly string[] NumTags = { "no", "numara", "numarasi", "odano", "roomno", "roomnumber", "mahalno" };
+
         class Node
         {
             public Point2d P; public int Id;
@@ -73,7 +82,7 @@ namespace CadAiDesigner
                 if (sr.Status != PromptStatus.OK) return;
                 ObjectId[] ids = sr.Value.GetObjectIds();
 
-                bool withVis = false;
+                bool withVis = false; string labelBlock = null;
                 // no further prompts — Enter defaults
 
                 string path, summary;
@@ -81,7 +90,7 @@ namespace CadAiDesigner
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     List<Room> rooms; List<Hit> hits;
-                    BuildFromSelection(ed, tx, db, ids, withVis, traced, out rooms, out hits);
+                    BuildFromSelection(ed, tx, db, ids, withVis, labelBlock, traced, out rooms, out hits);
                     if (rooms.Count == 0) { ed.WriteMessage("\nOda bulunamad\u0131 (kapal\u0131 alan / etiket yok).\n"); return; }
                     path = WriteExcel(doc, rooms, hits, out summary);
                     tx.Commit();
@@ -149,6 +158,24 @@ namespace CadAiDesigner
             if (vr.Status == PromptStatus.Cancel) return false;
             bool withVis = vr.Status == PromptStatus.OK && NormKey(vr.StringResult) == "evet";
 
+            string labelBlock = null;
+            PromptResult lr = ed.GetKeywords(new PromptKeywordOptions("\nMahal etiket blo\u011fu ad\u0131 verilsin mi? [Evet/Hayir] <Hayir>: ", "Evet Hayir") { AllowNone = true });
+            if (lr.Status == PromptStatus.Cancel) return false;
+            if (lr.Status == PromptStatus.OK && NormKey(lr.StringResult) == "evet")
+            {
+                PromptEntityOptions leo = new PromptEntityOptions("\nMahal etiket blo\u011funu se\u00e7in: ");
+                leo.SetRejectMessage("\nBlok de\u011fil."); leo.AddAllowedClass(typeof(BlockReference), false);
+                PromptEntityResult ler = ed.GetEntity(leo);
+                if (ler.Status != PromptStatus.OK) return false;
+                using (Transaction lt = db.TransactionManager.StartOpenCloseTransaction())
+                {
+                    BlockReference lbr = (BlockReference)lt.GetObject(ler.ObjectId, OpenMode.ForRead);
+                    labelBlock = EffName(lt, lbr);
+                    lt.Commit();
+                }
+                ed.WriteMessage("\nMahal etiket blo\u011fu: " + labelBlock);
+            }
+
             bool outCol = false;
             if (!buildingId.IsNull)
             {
@@ -184,9 +211,10 @@ namespace CadAiDesigner
                     if (bc != null && ArmaturCommands.IsClosedPublic(bc)) building = ArmaturCommands.SamplePublic(bc);
                 }
 
-                NameRoomsFromModel(tx, db, rooms);
+                HashSet<ObjectId> labelIds;
+                NameRoomsFromModel(tx, db, rooms, labelBlock, out labelIds);
 
-                List<Hit> hits = CollectHits(tx, db, rooms, building, only, withVis, outCol);
+                List<Hit> hits = CollectHits(tx, db, rooms, building, only, withVis, outCol, labelIds, labelBlock);
                 path = WriteExcel(doc, rooms, hits, out summary, outCol && building != null);
                 tx.Commit();
             }
@@ -197,12 +225,13 @@ namespace CadAiDesigner
         }
 
         static void BuildFromSelection(Editor ed, Transaction tx, Database db, ObjectId[] ids,
-            bool withVis, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits)
+            bool withVis, string labelBlock, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits)
         {
             List<ObjectId> closedPl = new List<ObjectId>();
-            List<object> segs = new List<object>(); // Point2d pairs stored as Point2d[]
-            List<Tuple<Point2d, string, double>> texts = new List<Tuple<Point2d, string, double>>();
+            List<object> segs = new List<object>();
+            List<Label> labels = new List<Label>();
             List<BlockReference> blocks = new List<BlockReference>();
+            HashSet<ObjectId> labelIds = new HashSet<ObjectId>();
 
             foreach (ObjectId id in ids)
             {
@@ -212,28 +241,28 @@ namespace CadAiDesigner
                 if (dxf == "INSERT")
                 {
                     BlockReference br = ent as BlockReference;
-                    if (br != null && Keep(tx, br)) blocks.Add(br);
-                    // room-name attributes
-                    if (br != null)
-                        foreach (ObjectId aid in br.AttributeCollection)
-                        {
-                            AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
-                            if (ar == null) continue;
-                            string tag = TrayKesif.Norm(ar.Tag);
-                            if (!(tag.Contains("oda") || tag.Contains("room") || tag.Contains("mekan") || tag.Contains("name") || tag.Contains("ad") || tag == "no" || tag == "numara")) continue;
-                            string s = CleanLabel(ar.TextString); if (s == null) continue;
-                            texts.Add(Tuple.Create(new Point2d(ar.Position.X, ar.Position.Y), s, ar.Height > 0 ? ar.Height : 1));
-                        }
+                    if (br == null) continue;
+                    string bn = EffName(tx, br);
+                    bool isNamedLabel = !string.IsNullOrEmpty(labelBlock) && string.Equals(bn, labelBlock, StringComparison.OrdinalIgnoreCase);
+                    string mahal; double pri;
+                    if (TryMahalLabel(tx, br, out mahal, out pri) || isNamedLabel)
+                    {
+                        if (mahal == null && isNamedLabel) { /* configured block but empty attrs — still exclude & try trace */ }
+                        if (mahal != null)
+                            labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        labelIds.Add(id);
+                    }
+                    if (Keep(tx, br)) blocks.Add(br);
                 }
                 else if (dxf == "TEXT")
                 {
                     DBText t = (DBText)ent;
-                    string s = CleanLabel(t.TextString); if (s != null) texts.Add(Tuple.Create(new Point2d(t.Position.X, t.Position.Y), s, t.Height));
+                    string s = CleanLabel(t.TextString); if (s != null) labels.Add(new Label { P = new Point2d(t.Position.X, t.Position.Y), Name = s, Pri = t.Height, BlockId = ObjectId.Null });
                 }
                 else if (dxf == "MTEXT")
                 {
                     MText t = (MText)ent;
-                    string s = CleanLabel(t.Contents); if (s != null) texts.Add(Tuple.Create(new Point2d(t.Location.X, t.Location.Y), s, t.TextHeight));
+                    string s = CleanLabel(t.Contents); if (s != null) labels.Add(new Label { P = new Point2d(t.Location.X, t.Location.Y), Name = s, Pri = t.TextHeight, BlockId = ObjectId.Null });
                 }
                 else if (dxf == "LWPOLYLINE" || dxf == "POLYLINE" || dxf == "CIRCLE")
                 {
@@ -246,42 +275,37 @@ namespace CadAiDesigner
             }
 
             rooms = new List<Room>();
-            // 1) closed polylines / circles in selection
             foreach (ObjectId id in closedPl)
             {
                 Curve c = tx.GetObject(id, OpenMode.ForRead) as Curve;
                 List<Point2d> poly = ArmaturCommands.SamplePublic(c);
                 if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
             }
+            foreach (List<Point2d> f in FindFaces(segs)) AddUniqueRoom(rooms, f);
 
-            // 2) planar-graph faces from selected edges (plain-line grids; TraceBoundary often fails in console)
-            List<List<Point2d>> faces = FindFaces(segs);
-            foreach (List<Point2d> f in faces) AddUniqueRoom(rooms, f);
-
-            // 3) TraceBoundary only for labels not already inside a detected room
-            foreach (var t in texts)
+            // TraceBoundary from mahal label inserts first, then other labels not yet inside a room
+            foreach (Label lb in labels.OrderByDescending(l => l.Pri))
             {
-                if (rooms.Any(r => ArmaturGeo.Inside(r.Poly, t.Item1))) continue;
-                Curve best = TraceAt(ed, new Point3d(t.Item1.X, t.Item1.Y, 0), traced);
-                if (best != null)
-                {
-                    List<Point2d> poly = ArmaturCommands.SamplePublic(best);
-                    if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
-                }
+                if (rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P))) continue;
+                Curve best = TraceAt(ed, new Point3d(lb.P.X, lb.P.Y, 0), traced);
+                if (best == null) continue;
+                List<Point2d> poly = ArmaturCommands.SamplePublic(best);
+                if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
             }
 
-            // drop outer / building-scale faces; merge near-duplicates
             rooms = FilterOuter(rooms);
             rooms = MergeOverlapping(rooms);
-
-            // name: labels inside, prefer smallest enclosing room; unnamed -> Oda n (esp. faces that contain blocks)
-            NameRooms(rooms, texts);
+            HashSet<ObjectId> usedLabels;
+            NameRooms(rooms, labels, out usedLabels);
+            foreach (ObjectId id in usedLabels) labelIds.Add(id);
+            // also exclude every insert of configured label block name / any mahal-attr block seen
             rooms = rooms.OrderBy(r => r.Area).ToList();
 
-            // only count selected blocks; outside all rooms = legend, skipped (no outCol in auto mode)
             hits = new List<Hit>();
             foreach (BlockReference br in blocks)
             {
+                if (labelIds.Contains(br.ObjectId)) continue;
+                if (!string.IsNullOrEmpty(labelBlock) && string.Equals(EffName(tx, br), labelBlock, StringComparison.OrdinalIgnoreCase)) continue;
                 Point2d p = new Point2d(br.Position.X, br.Position.Y);
                 int ri = -1;
                 for (int i = 0; i < rooms.Count; i++)
@@ -290,6 +314,52 @@ namespace CadAiDesigner
                 hits.Add(new Hit { Key = BlockKey(tx, br, withVis), P = p, Room = ri });
             }
             hits = Dedupe(hits);
+        }
+
+        /// <summary>Build room name from attributes: preferred name tag + optional NO/NUMARA -> "101 Salon".</summary>
+        static bool TryMahalLabel(Transaction tx, BlockReference br, out string name, out double pri)
+        {
+            name = null; pri = 1;
+            if (br.AttributeCollection == null || br.AttributeCollection.Count == 0) return false;
+            string nm = null, num = null; double h = 1;
+            string first = null;
+            foreach (ObjectId aid in br.AttributeCollection)
+            {
+                AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
+                if (ar == null) continue;
+                string val = CleanLabel(AttPlain(ar)); if (val == null) continue;
+                if (first == null) first = val;
+                string tag = TrayKesif.Norm(ar.Tag);
+                if (IsNameTag(tag) && nm == null) { nm = val; if (ar.Height > 0) h = ar.Height; }
+                if (IsNumTag(tag) && num == null) num = val;
+            }
+            if (nm == null) nm = first;
+            if (nm == null) return false;
+            if (num != null && !nm.StartsWith(num + " ", StringComparison.OrdinalIgnoreCase) && !string.Equals(nm, num, StringComparison.OrdinalIgnoreCase))
+                name = num + " " + nm;
+            else name = nm;
+            pri = h;
+            return true;
+        }
+
+        static bool IsNameTag(string tag)
+        {
+            if (string.IsNullOrEmpty(tag)) return false;
+            foreach (string k in NameTags) if (tag == k || tag.StartsWith(k) || tag.EndsWith(k)) return true;
+            return false;
+        }
+
+        static bool IsNumTag(string tag)
+        {
+            if (string.IsNullOrEmpty(tag)) return false;
+            foreach (string k in NumTags) if (tag == k || tag.StartsWith(k) || tag.EndsWith(k)) return true;
+            return false;
+        }
+
+        static string AttPlain(AttributeReference ar)
+        {
+            try { if (ar.IsMTextAttribute && ar.MTextAttribute != null) return ar.MTextAttribute.Text; } catch (System.Exception) { }
+            return ar.TextString;
         }
 
         static void CollectEdges(Entity ent, List<object> segs)
@@ -517,18 +587,20 @@ namespace CadAiDesigner
             return new Point2d(x / p.Count, y / p.Count);
         }
 
-        static void NameRooms(List<Room> rooms, List<Tuple<Point2d, string, double>> texts)
+        static void NameRooms(List<Room> rooms, List<Label> labels, out HashSet<ObjectId> usedLabelBlocks)
         {
-                        HashSet<string> used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            // assign labels to smallest enclosing room
+            usedLabelBlocks = new HashSet<ObjectId>();
+            HashSet<string> used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var byArea = rooms.OrderBy(r => r.Area).ToList();
             Dictionary<Room, string> map = new Dictionary<Room, string>();
-            foreach (var t in texts.OrderByDescending(t => t.Item3).ThenBy(t => t.Item2.Length))
+            // higher Pri first (mahal blocks ~10000+); then shorter names
+            foreach (Label t in labels.OrderByDescending(l => l.Pri).ThenBy(l => l.Name.Length))
             {
-                Room host = byArea.FirstOrDefault(r => ArmaturGeo.Inside(r.Poly, t.Item1));
+                Room host = byArea.FirstOrDefault(r => ArmaturGeo.Inside(r.Poly, t.P));
                 if (host == null || map.ContainsKey(host)) continue;
-                if (!used.Add(t.Item2)) continue;
-                map[host] = t.Item2;
+                if (!used.Add(t.Name)) continue;
+                map[host] = t.Name;
+                if (!t.BlockId.IsNull) usedLabelBlocks.Add(t.BlockId);
             }
             int n = 1;
             foreach (Room r in rooms)
@@ -539,29 +611,45 @@ namespace CadAiDesigner
             }
         }
 
-        static void NameRoomsFromModel(Transaction tx, Database db, List<Room> rooms)
+        static void NameRoomsFromModel(Transaction tx, Database db, List<Room> rooms, string labelBlock, out HashSet<ObjectId> labelIds)
         {
+            labelIds = new HashSet<ObjectId>();
             BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
             BlockTableRecord ms = (BlockTableRecord)tx.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
-            var texts = new List<Tuple<Point2d, string, double>>();
+            List<Label> labels = new List<Label>();
             foreach (ObjectId id in ms)
             {
                 string dxf = id.ObjectClass.DxfName;
-                if (dxf == "TEXT")
+                if (dxf == "INSERT")
+                {
+                    BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
+                    if (br == null) continue;
+                    string bn = EffName(tx, br);
+                    bool isNamed = !string.IsNullOrEmpty(labelBlock) && string.Equals(bn, labelBlock, StringComparison.OrdinalIgnoreCase);
+                    string mahal; double pri;
+                    if (TryMahalLabel(tx, br, out mahal, out pri) || isNamed)
+                    {
+                        if (mahal != null) labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        labelIds.Add(id);
+                    }
+                }
+                else if (dxf == "TEXT")
                 {
                     DBText t = (DBText)tx.GetObject(id, OpenMode.ForRead);
-                    string s = CleanLabel(t.TextString); if (s != null) texts.Add(Tuple.Create(new Point2d(t.Position.X, t.Position.Y), s, t.Height));
+                    string s = CleanLabel(t.TextString); if (s != null) labels.Add(new Label { P = new Point2d(t.Position.X, t.Position.Y), Name = s, Pri = t.Height, BlockId = ObjectId.Null });
                 }
                 else if (dxf == "MTEXT")
                 {
                     MText t = (MText)tx.GetObject(id, OpenMode.ForRead);
-                    string s = CleanLabel(t.Contents); if (s != null) texts.Add(Tuple.Create(new Point2d(t.Location.X, t.Location.Y), s, t.TextHeight));
+                    string s = CleanLabel(t.Contents); if (s != null) labels.Add(new Label { P = new Point2d(t.Location.X, t.Location.Y), Name = s, Pri = t.TextHeight, BlockId = ObjectId.Null });
                 }
             }
-            NameRooms(rooms, texts);
+            HashSet<ObjectId> used;
+            NameRooms(rooms, labels, out used);
+            foreach (ObjectId id in used) labelIds.Add(id);
         }
 
-        static List<Hit> CollectHits(Transaction tx, Database db, List<Room> rooms, List<Point2d> building, HashSet<ObjectId> only, bool withVis, bool outCol)
+        static List<Hit> CollectHits(Transaction tx, Database db, List<Room> rooms, List<Point2d> building, HashSet<ObjectId> only, bool withVis, bool outCol, HashSet<ObjectId> labelIds, string labelBlock)
         {
             List<Hit> hits = new List<Hit>();
             BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -570,8 +658,10 @@ namespace CadAiDesigner
             {
                 if (only != null && !only.Contains(id)) continue;
                 if (id.ObjectClass.DxfName != "INSERT") continue;
+                if (labelIds != null && labelIds.Contains(id)) continue;
                 BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
                 if (br == null || !Keep(tx, br)) continue;
+                if (!string.IsNullOrEmpty(labelBlock) && string.Equals(EffName(tx, br), labelBlock, StringComparison.OrdinalIgnoreCase)) continue;
                 Point2d p = new Point2d(br.Position.X, br.Position.Y);
                 if (building != null && !ArmaturGeo.Inside(building, p)) continue;
                 int ri = -1;
