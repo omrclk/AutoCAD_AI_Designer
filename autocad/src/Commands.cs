@@ -17,6 +17,7 @@ using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 [assembly: CommandClass(typeof(CadAiDesigner.AttImportCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.ArmaturCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.AydHesapCommands))]
+[assembly: CommandClass(typeof(CadAiDesigner.OdaSayimCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.TavaCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.HatchDiagCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.RefCommands))]

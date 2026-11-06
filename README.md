@@ -190,3 +190,11 @@ Panel: 'ArmatÃ¼r yerleÅŸimi'. ArmatÃ¼r bloÄŸunu tÄ±klayÄ±n, aÃ§Ä±k/kapalÄ± polyl
 - DiÄŸer yÃ¶ntemlerde yerleÅŸimden sonra "AydÄ±nlatma hesabÄ±?" sorulur. Rapor: Eort, Eminâ‰ˆ, Uoâ‰ˆ (komut satÄ±rÄ± + panel), isteÄŸe baÄŸlÄ± MTEXT etiket ve Excel (`*_aydinlatma_*.xlsx`, servis `/xlsx`).
 - `AIDAYDHESAP` / `AHESAP` (panel: "AydÄ±nlatma hesabÄ±"): oda polyline / iÃ§ nokta + mevcut armatÃ¼rler (yalnÄ±z oda iÃ§indekiler sayÄ±lÄ±r).
 - **YaklaÅŸÄ±ktÄ±r:** UF tablosu genel doÄŸrudan-geniÅŸ daÄŸÄ±lÄ±mlÄ± armatÃ¼r iÃ§in tipik deÄŸerlerdir (CIBSE/LiTG tarzÄ± Ã¼retici UF tablolarÄ±, zemin 0,2). Uo nokta hesabÄ± Lambert kabulÃ¼, yalnÄ±z doÄŸrudan Ä±ÅŸÄ±k (E = Î¦hÂ²/(Ï€dâ´)), duvar bandÄ± 0,5 m. Kesin sonuÃ§ iÃ§in DIALux/Ã¼retici fotometrisi kullanÄ±n.
+
+## Oda blok sayımı (AIDODASAYIM / OSAY)
+
+Panel: **Oda blok sayımı**. Kapalı oda polyline'larını seçin (veya Icnokta ile iç nokta); isteğe bağlı bina dış sınır polyline'ı; isteğe bağlı blok seçimi (Enter = modeldeki tüm INSERT).
+- Oda adı: oda içindeki TEXT/MTEXT veya oda/room attribute; yoksa `Oda 1..n`. İç içe odalarda en küçük içeren odaya atanır.
+- Blok adı: dinamik blokta effective name; isteğe bağlı görünürlük durumu. Xref ve title/antet blokları atlanır. Aynı ad + aynı konum (1 birim) bir kez sayılır.
+- Bina sınırı verilirse dışındaki (sembol listesi vb.) sayılmaz; isteğe bağlı `Oda dışı (bina içi)` sütunu.
+- Excel (`*_odasayim_*.xlsx`, servis `/xlsx`): satırlar = bloklar, sütunlar = odalar, satır/sütun toplamları + genel toplam. Dosya çizimin yanında kaydedilir ve açılır.
