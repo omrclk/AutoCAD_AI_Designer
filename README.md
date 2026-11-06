@@ -193,9 +193,8 @@ Panel: 'ArmatÃ¼r yerleÅimi'. ArmatÃ¼r bloÄunu tÄ±klayÄ±n, aÃ§Ä�
 
 ## Oda blok sayımı (AIDODASAYIM / OSAY)
 
-Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi**.
-- Önce mahal etiket bloğu: tıklayın → attribute etiketlerinden oda adı (+ isteğe bağlı numara) seçin; **Enter = otomatik** (MAHAL/ODA/ROOM… sezgisel). Seçim çizim oturumunda hatırlanır; değiştirmek için **Ayarlar**.
-- Pinlenen blok adı yalnız etiket olarak kullanılır ve sayımdan çıkar. Ad önceliği: mahal bloğu > TEXT/MTEXT. NO+ad → `101 Salon`.
-- Odalar: kapalı polyline, düzlemsel yüz (grid), TraceBoundary (etiket noktası). Oda dışı bloklar (sembol listesi) sayılmaz; mükerrer (ad+XY) bir kez.
-- Excel: `*_odasayim_*.xlsx` (`/xlsx`).
+Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı polyline istemez).
+- Mahal etiketi: blok tıkla + attribute seç (veya Enter=otomatik); çizimde hatırlanır (**Ayarlar** ile değişir). Pinlenen blok sayılmaz.
+- **Duvar boşlukları:** varsayılan 1200 mm (birime göre ölçeklenir; Ayarlar’da değişir). Kapı açıklıklarını köprüler, T-birleşim / kısa kalan uçları uzatır, sonra düzlemsel yüz; yedek TraceBoundary (HPGAPTOL) ve ışın tarama. Bulunamayan odalar raporlanır.
+- Excel: `*_odasayim_*.xlsx`.
 

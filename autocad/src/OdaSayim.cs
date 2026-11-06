@@ -17,7 +17,10 @@ namespace CadAiDesigner
     public class OdaSayimCommands
     {
         const double PosTol = 1.0;
-        const double SnapTol = 5.0; // node snap for planar graph (drawing units)
+        const double SnapTol = 5.0; // base node snap (drawing units)
+        const double DefaultGapMm = 1200.0; // door / T-junction tolerance
+
+        static readonly Dictionary<string, double> GapMem = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         static readonly JavaScriptSerializer Js = new JavaScriptSerializer { MaxJsonLength = 64000000 };
 
         class Room
@@ -102,6 +105,7 @@ namespace CadAiDesigner
 
                 MahalCfg cfg;
                 if (!AskMahalCfg(ed, db, doc, false, out cfg)) return;
+                double gap = ResolveGap(ed, db, doc, false);
 
                 PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nPlan\u0131 se\u00e7in (oda etiketleri, \u00e7izgiler, bloklar): " });
                 if (sr.Status != PromptStatus.OK) return;
@@ -113,9 +117,14 @@ namespace CadAiDesigner
                 using (doc.LockDocument())
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
-                    List<Room> rooms; List<Hit> hits;
-                    BuildFromSelection(ed, tx, db, ids, withVis, cfg, traced, out rooms, out hits);
-                    if (rooms.Count == 0) { ed.WriteMessage("\nOda bulunamad\u0131 (kapal\u0131 alan / etiket yok).\n"); return; }
+                    List<Room> rooms; List<Hit> hits; List<string> missing;
+                    BuildFromSelection(ed, tx, db, ids, withVis, cfg, gap, traced, out rooms, out hits, out missing);
+                    if (rooms.Count == 0)
+                    {
+                        ed.WriteMessage("\nOda bulunamad\u0131 (duvar bo\u015fluklar\u0131 / etiket). Bo\u015fluk tolerans\u0131=" + Fmm(gap, db) + " mm. Ayarlar ile art\u0131r\u0131n.\n");
+                        if (missing != null && missing.Count > 0) ed.WriteMessage("  Bulunamayan: " + string.Join(", ", missing.Take(12)) + "\n");
+                        return;
+                    }
                     path = WriteExcel(doc, rooms, hits, out summary);
                     tx.Commit();
                 }
@@ -184,6 +193,7 @@ namespace CadAiDesigner
 
             MahalCfg cfg;
             if (!AskMahalCfg(ed, db, doc, true, out cfg)) return false;
+            double gap = ResolveGap(ed, db, doc, true);
 
             bool outCol = false;
             if (!buildingId.IsNull)
@@ -234,7 +244,7 @@ namespace CadAiDesigner
         }
 
         static void BuildFromSelection(Editor ed, Transaction tx, Database db, ObjectId[] ids,
-            bool withVis, MahalCfg cfg, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits)
+            bool withVis, MahalCfg cfg, double gap, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits, out List<string> missing)
         {
             List<ObjectId> closedPl = new List<ObjectId>();
             List<object> segs = new List<object>();
@@ -292,22 +302,44 @@ namespace CadAiDesigner
             }
 
             rooms = new List<Room>();
+            missing = new List<string>();
             foreach (ObjectId id in closedPl)
             {
                 Curve c = tx.GetObject(id, OpenMode.ForRead) as Curve;
                 List<Point2d> poly = ArmaturCommands.SamplePublic(c);
                 if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
             }
-            foreach (List<Point2d> f in FindFaces(segs)) AddUniqueRoom(rooms, f);
 
-            // TraceBoundary from mahal label inserts first, then other labels not yet inside a room
-            foreach (Label lb in labels.OrderByDescending(l => l.Pri))
+            double nodeTol = Math.Max(SnapTol, Math.Min(gap * 0.05, 50 * ArmaturCommands.MmPublic(db)));
+            List<object> closedSegs = CloseGaps(segs, gap);
+            foreach (List<Point2d> f in FindFaces(closedSegs, nodeTol)) AddUniqueRoom(rooms, f);
+
+            // TraceBoundary (HPGAPTOL=gap) for labels not yet inside a room
+            object oldGap = null;
+            try
+            {
+                try { oldGap = Autodesk.AutoCAD.ApplicationServices.Application.GetSystemVariable("HPGAPTOL"); Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("HPGAPTOL", gap); } catch (System.Exception) { oldGap = null; }
+                foreach (Label lb in labels.OrderByDescending(l => l.Pri))
+                {
+                    if (rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P))) continue;
+                    Curve best = TraceAt(ed, new Point3d(lb.P.X, lb.P.Y, 0), traced);
+                    if (best == null) continue;
+                    List<Point2d> poly = ArmaturCommands.SamplePublic(best);
+                    if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
+                }
+            }
+            finally
+            {
+                if (oldGap != null) try { Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("HPGAPTOL", oldGap); } catch (System.Exception) { }
+            }
+
+            // ray-cast fallback from each remaining label
+            List<Point2d[]> segArr = closedSegs.Select(o => (Point2d[])o).ToList();
+            foreach (Label lb in labels)
             {
                 if (rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P))) continue;
-                Curve best = TraceAt(ed, new Point3d(lb.P.X, lb.P.Y, 0), traced);
-                if (best == null) continue;
-                List<Point2d> poly = ArmaturCommands.SamplePublic(best);
-                if (poly.Count >= 3) AddUniqueRoom(rooms, poly);
+                List<Point2d> poly = RoomFromRays(lb.P, segArr, Math.Max(gap * 20, 5000 * ArmaturCommands.MmPublic(db)));
+                if (poly != null && poly.Count >= 3) AddUniqueRoom(rooms, poly);
             }
 
             rooms = FilterOuter(rooms);
@@ -315,7 +347,9 @@ namespace CadAiDesigner
             HashSet<ObjectId> usedLabels;
             NameRooms(rooms, labels, out usedLabels);
             foreach (ObjectId id in usedLabels) labelIds.Add(id);
-            // also exclude every insert of configured label block name / any mahal-attr block seen
+            foreach (Label lb in labels)
+                if (!string.IsNullOrEmpty(lb.Name) && !rooms.Any(r => ArmaturGeo.Inside(r.Poly, lb.P)))
+                    if (!missing.Contains(lb.Name)) missing.Add(lb.Name);
             rooms = rooms.OrderBy(r => r.Area).ToList();
 
             hits = new List<Hit>();
@@ -531,29 +565,208 @@ namespace CadAiDesigner
             }
         }
 
-        /// <summary>Split raw segments at crossings / T-joints, then enumerate bounded faces (node snap = SnapTol).</summary>
-        static List<Point2d[]> Planarize(List<object> segs)
+        static double ResolveGap(Editor ed, Database db, Document doc, bool force)
         {
-            List<Point2d[]> raw = segs.Select(o => (Point2d[])o).Where(ab => ab[0].GetDistanceTo(ab[1]) >= SnapTol * 0.5).ToList();
-            // candidate split points = all endpoints
+            double def = DefaultGapMm * ArmaturCommands.MmPublic(db);
+            string key = MemKey(doc);
+            double g;
+            if (!force && GapMem.TryGetValue(key, out g) && g > 0)
+            {
+                ed.WriteMessage("\nBo\u015fluk tolerans\u0131 (bellek): " + Fmm(g, db) + " mm.\n");
+                return g;
+            }
+            if (!force) { GapMem[key] = def; return def; }
+            double mm = DefaultGapMm;
+            if (GapMem.TryGetValue(key, out g) && g > 0) mm = g / Math.Max(1e-12, ArmaturCommands.MmPublic(db));
+            PromptDoubleOptions po = new PromptDoubleOptions("\nDuvar bo\u015fluk / kap\u0131 tolerans\u0131 (mm)") { AllowNone = true, AllowNegative = false, AllowZero = false, DefaultValue = mm, UseDefaultValue = true };
+            PromptDoubleResult pr = ed.GetDouble(po);
+            if (pr.Status == PromptStatus.Cancel) { /* keep previous */ return GapMem.TryGetValue(key, out g) ? g : def; }
+            if (pr.Status == PromptStatus.OK) mm = pr.Value;
+            g = mm * ArmaturCommands.MmPublic(db);
+            GapMem[key] = g;
+            ed.WriteMessage("\nBo\u015fluk tolerans\u0131: " + Fmm(g, db) + " mm.\n");
+            return g;
+        }
+
+        static string Fmm(double units, Database db)
+        {
+            double mm = units / Math.Max(1e-12, ArmaturCommands.MmPublic(db));
+            return mm.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Close door openings / short T-junctions / near-miss crossings within gap.</summary>
+        static List<object> CloseGaps(List<object> segs, double gap)
+        {
+            List<Point2d[]> S = segs.Select(o => (Point2d[])o).Where(ab => ab[0].GetDistanceTo(ab[1]) > 1e-6).Select(ab => new[] { ab[0], ab[1] }).ToList();
+            if (S.Count == 0) return new List<object>();
+            double tol = Math.Max(gap, SnapTol);
+            double near = Math.Max(SnapTol, Math.Min(tol * 0.08, 100 * 1)); // nearly-coincident only (not whole doors)
+
+            // A) extend along segment direction to hit another segment (near-miss / short of crossing)
+            for (int i = 0; i < S.Count; i++)
+            {
+                for (int e = 0; e < 2; e++)
+                {
+                    Point2d p = S[i][e], o = S[i][1 - e];
+                    Vector2d dir = p - o; double len = dir.Length; if (len < 1e-9) continue;
+                    dir = dir / len;
+                    double bestT = tol + 1; Point2d bestP = p;
+                    for (int j = 0; j < S.Count; j++)
+                    {
+                        if (j == i) continue;
+                        Point2d a = S[j][0], b = S[j][1];
+                        Vector2d s = b - a; double den = dir.X * s.Y - dir.Y * s.X;
+                        if (Math.Abs(den) < 1e-12) continue;
+                        double t = ((a.X - p.X) * s.Y - (a.Y - p.Y) * s.X) / den;
+                        double u = ((a.X - p.X) * dir.Y - (a.Y - p.Y) * dir.X) / den;
+                        if (t < 1e-6 || t > tol) continue;
+                        if (u < -0.02 || u > 1.02) continue;
+                        u = Math.Max(0, Math.Min(1, u));
+                        Point2d ip = a + s * u;
+                        if (t < bestT) { bestT = t; bestP = ip; }
+                    }
+                    if (bestT <= tol) S[i][e] = bestP;
+                }
+            }
+
+            // B) T-junction: project dangling end onto a non-collinear segment within tol
+            for (int i = 0; i < S.Count; i++)
+            {
+                Vector2d di = S[i][1] - S[i][0]; double li = di.Length; if (li < 1e-9) continue;
+                di = di / li;
+                for (int e = 0; e < 2; e++)
+                {
+                    Point2d p = S[i][e];
+                    double best = tol; Point2d foot = p; bool hit = false;
+                    for (int j = 0; j < S.Count; j++)
+                    {
+                        if (j == i) continue;
+                        Point2d a = S[j][0], b = S[j][1];
+                        Vector2d ab = b - a; double l2 = ab.DotProduct(ab); if (l2 < 1e-12) continue;
+                        Vector2d dj = ab / Math.Sqrt(l2);
+                        if (Math.Abs(di.X * dj.Y - di.Y * dj.X) < 0.15) continue; // skip collinear (doors handled below)
+                        double tt = (p - a).DotProduct(ab) / l2;
+                        double pad = tol / Math.Sqrt(l2);
+                        if (tt < -pad || tt > 1 + pad) continue;
+                        tt = Math.Max(0, Math.Min(1, tt));
+                        Point2d fpt = a + ab * tt;
+                        double d = p.GetDistanceTo(fpt);
+                        if (d > 1e-9 && d <= best) { best = d; foot = fpt; hit = true; }
+                    }
+                    if (hit) S[i][e] = foot;
+                }
+            }
+
+            // C) bridge collinear door gaps only (facing ends, lateral offset small)
+            List<Point2d[]> bridges = new List<Point2d[]>();
+            for (int i = 0; i < S.Count; i++)
+            {
+                Vector2d di = S[i][1] - S[i][0]; double li = di.Length; if (li < 1e-9) continue;
+                di = di / li;
+                for (int j = i + 1; j < S.Count; j++)
+                {
+                    Vector2d dj = S[j][1] - S[j][0]; double lj = dj.Length; if (lj < 1e-9) continue;
+                    dj = dj / lj;
+                    double cross = Math.Abs(di.X * dj.Y - di.Y * dj.X);
+                    double dot = di.DotProduct(dj);
+                    if (cross > 0.08 || Math.Abs(dot) < 0.95) continue;
+                    Vector2d ij = S[j][0] - S[i][0];
+                    double lat = Math.Abs(di.X * ij.Y - di.Y * ij.X);
+                    if (lat > Math.Max(SnapTol * 2, tol * 0.05)) continue;
+                    double bd = tol + 1; Point2d ba = default(Point2d), bb = default(Point2d); bool ok = false;
+                    for (int e = 0; e < 2; e++)
+                        for (int f = 0; f < 2; f++)
+                        {
+                            double d = S[i][e].GetDistanceTo(S[j][f]);
+                            if (d > 1e-6 && d < bd) { bd = d; ba = S[i][e]; bb = S[j][f]; ok = true; }
+                        }
+                    if (!ok || bd > tol) continue;
+                    Vector2d g = bb - ba; double gl = g.Length; if (gl < 1e-9) continue;
+                    if (Math.Abs((g / gl).DotProduct(di)) < 0.9) continue;
+                    // prefer bridging the gap between segment interiors (not overlapping)
+                    if (SegmentsOverlapCollinear(S[i], S[j], di)) continue;
+                    bridges.Add(new[] { ba, bb });
+                }
+            }
+            S.AddRange(bridges);
+
+            // D) only merge nearly-coincident endpoints (small near), not door-scale
+            for (int i = 0; i < S.Count; i++)
+                for (int e = 0; e < 2; e++)
+                {
+                    Point2d p = S[i][e];
+                    for (int j = 0; j < S.Count; j++)
+                    {
+                        if (j == i) continue;
+                        for (int f = 0; f < 2; f++)
+                        {
+                            double d = p.GetDistanceTo(S[j][f]);
+                            if (d > 1e-9 && d <= near)
+                            {
+                                Point2d m = new Point2d((p.X + S[j][f].X) / 2, (p.Y + S[j][f].Y) / 2);
+                                S[i][e] = m; S[j][f] = m; p = m;
+                            }
+                        }
+                    }
+                }
+
+            return S.Where(ab => ab[0].GetDistanceTo(ab[1]) > 1e-4).Cast<object>().ToList();
+        }
+
+        static bool SegmentsOverlapCollinear(Point2d[] a, Point2d[] b, Vector2d dir)
+        {
+            double a0 = a[0].X * dir.X + a[0].Y * dir.Y, a1 = a[1].X * dir.X + a[1].Y * dir.Y;
+            double b0 = b[0].X * dir.X + b[0].Y * dir.Y, b1 = b[1].X * dir.X + b[1].Y * dir.Y;
+            double alo = Math.Min(a0, a1), ahi = Math.Max(a0, a1), blo = Math.Min(b0, b1), bhi = Math.Max(b0, b1);
+            return !(ahi < blo - 1e-6 || bhi < alo - 1e-6);
+        }
+
+        /// <summary>Last-resort room: cast rays from label; require most rays to hit a wall (not escape).</summary>
+        static List<Point2d> RoomFromRays(Point2d o, List<Point2d[]> segs, double maxR)
+        {
+            if (segs.Count == 0 || maxR <= 0) return null;
+            int n = 72; List<Point2d> hits = new List<Point2d>(); int escaped = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double ang = 2 * Math.PI * i / n;
+                Vector2d dir = new Vector2d(Math.Cos(ang), Math.Sin(ang));
+                double best = maxR; Point2d hp = o + dir * maxR;
+                foreach (Point2d[] ab in segs)
+                {
+                    Vector2d s = ab[1] - ab[0]; double den = dir.X * s.Y - dir.Y * s.X;
+                    if (Math.Abs(den) < 1e-12) continue;
+                    double t = ((ab[0].X - o.X) * s.Y - (ab[0].Y - o.Y) * s.X) / den;
+                    double u = ((ab[0].X - o.X) * dir.Y - (ab[0].Y - o.Y) * dir.X) / den;
+                    if (t < 1e-4 || t > best || u < -0.02 || u > 1.02) continue;
+                    best = t; hp = o + dir * t;
+                }
+                if (best >= maxR * 0.98) escaped++;
+                hits.Add(hp);
+            }
+            if (escaped > n / 3) return null;
+            if (AbsArea(hits) < maxR) return null;
+            return hits;
+        }
+
+        /// <summary>Split raw segments at crossings / T-joints, then enumerate bounded faces.</summary>
+        static List<Point2d[]> Planarize(List<object> segs, double nodeTol)
+        {
+            List<Point2d[]> raw = segs.Select(o => (Point2d[])o).Where(ab => ab[0].GetDistanceTo(ab[1]) >= nodeTol * 0.25).ToList();
             List<Point2d> pts = new List<Point2d>();
-            Action<Point2d> add = p => { foreach (Point2d q in pts) if (q.GetDistanceTo(p) <= SnapTol) return; pts.Add(p); };
+            Action<Point2d> add = p => { foreach (Point2d q in pts) if (q.GetDistanceTo(p) <= nodeTol) return; pts.Add(p); };
             foreach (Point2d[] ab in raw) { add(ab[0]); add(ab[1]); }
-            // pairwise intersections + endpoints lying on other segments
             for (int i = 0; i < raw.Count; i++)
                 for (int j = i + 1; j < raw.Count; j++)
                 {
                     Point2d a = raw[i][0], b = raw[i][1], c = raw[j][0], d = raw[j][1];
                     Point2d ip; if (SegIntersect(a, b, c, d, out ip)) add(ip);
                 }
-            foreach (Point2d[] ab in raw)
-                foreach (Point2d p in pts)
-                    if (OnSeg(ab[0], ab[1], p)) add(p); // already in pts; OnSeg used below when splitting
+            // also near-miss crossings: extend ends within nodeTol already done in CloseGaps; still project
             List<Point2d[]> outp = new List<Point2d[]>();
             foreach (Point2d[] ab in raw)
             {
                 List<Point2d> mid = new List<Point2d>();
-                foreach (Point2d p in pts) if (OnSeg(ab[0], ab[1], p) && p.GetDistanceTo(ab[0]) > SnapTol && p.GetDistanceTo(ab[1]) > SnapTol) mid.Add(p);
+                foreach (Point2d p in pts) if (OnSeg(ab[0], ab[1], p, nodeTol) && p.GetDistanceTo(ab[0]) > nodeTol && p.GetDistanceTo(ab[1]) > nodeTol) mid.Add(p);
                 mid = mid.OrderBy(p => p.GetDistanceTo(ab[0])).ToList();
                 Point2d prev = ab[0];
                 foreach (Point2d p in mid) { outp.Add(new[] { prev, p }); prev = p; }
@@ -566,31 +779,31 @@ namespace CadAiDesigner
         {
             ip = default(Point2d);
             Vector2d r = b - a, s = d - c; double den = r.X * s.Y - r.Y * s.X;
-            if (Math.Abs(den) < 1e-12) return false; // parallel
+            if (Math.Abs(den) < 1e-12) return false;
             Vector2d ca = c - a;
             double t = (ca.X * s.Y - ca.Y * s.X) / den, u = (ca.X * r.Y - ca.Y * r.X) / den;
             if (t < -1e-9 || t > 1 + 1e-9 || u < -1e-9 || u > 1 + 1e-9) return false;
             ip = a + r * Math.Max(0, Math.Min(1, t)); return true;
         }
 
-        static bool OnSeg(Point2d a, Point2d b, Point2d p)
+        static bool OnSeg(Point2d a, Point2d b, Point2d p, double tol)
         {
-            if (p.GetDistanceTo(a) <= SnapTol || p.GetDistanceTo(b) <= SnapTol) return true;
+            if (p.GetDistanceTo(a) <= tol || p.GetDistanceTo(b) <= tol) return true;
             Vector2d ab = b - a; double l2 = ab.DotProduct(ab); if (l2 < 1e-12) return false;
             double t = (p - a).DotProduct(ab) / l2; if (t < 0 || t > 1) return false;
-            return (a + ab * t).GetDistanceTo(p) <= SnapTol;
+            return (a + ab * t).GetDistanceTo(p) <= tol;
         }
 
-        static List<List<Point2d>> FindFaces(List<object> segs)
+        static List<List<Point2d>> FindFaces(List<object> segs, double nodeTol)
         {
             List<List<Point2d>> faces = new List<List<Point2d>>();
-            List<Point2d[]> planar = Planarize(segs);
+            List<Point2d[]> planar = Planarize(segs, nodeTol);
             if (planar.Count == 0) return faces;
             List<Node> nodes = new List<Node>();
             Func<Point2d, int> nid = p =>
             {
                 for (int i = 0; i < nodes.Count; i++)
-                    if (nodes[i].P.GetDistanceTo(p) <= SnapTol) return i;
+                    if (nodes[i].P.GetDistanceTo(p) <= nodeTol) return i;
                 int id = nodes.Count; nodes.Add(new Node { P = p, Id = id }); return id;
             };
             List<DEdge> E = new List<DEdge>();
@@ -642,7 +855,7 @@ namespace CadAiDesigner
                 }
                 if (cur != i || poly.Count < 3) continue;
                 double a = AbsArea(poly);
-                if (a < SnapTol * SnapTol) continue;
+                if (a < nodeTol * nodeTol) continue;
                 // keep only CCW (positive shoelace) — CW is the outer/complement walk
                 if (SignedArea(poly) >= 0) continue; // keep CCW (negative shoelace); CW = outer walks
                 faces.Add(poly);
