@@ -36,6 +36,28 @@ namespace CadAiDesigner
         static readonly string[] NameTags = { "mahal", "mahaladi", "oda", "odaadi", "room", "name", "ad", "isim", "mekan", "mekanadi" };
         static readonly string[] NumTags = { "no", "numara", "numarasi", "odano", "roomno", "roomnumber", "mahalno" };
 
+        class MahalCfg
+        {
+            public string BlockName; // only this block is label + excluded
+            public string NameTag;   // attribute tag for room name
+            public string NumTag;    // optional number tag
+            public override string ToString()
+            {
+                string s = BlockName ?? "?";
+                if (!string.IsNullOrEmpty(NameTag)) s += " / " + NameTag;
+                if (!string.IsNullOrEmpty(NumTag)) s += " + " + NumTag;
+                return s;
+            }
+        }
+
+        static readonly Dictionary<string, MahalCfg> MahalMem = new Dictionary<string, MahalCfg>(StringComparer.OrdinalIgnoreCase);
+
+        static string MemKey(Document doc)
+        {
+            try { return Convert.ToString(doc.Database.FingerprintGuid); }
+            catch (System.Exception) { return doc.Name ?? ""; }
+        }
+
         class Node
         {
             public Point2d P; public int Id;
@@ -78,19 +100,21 @@ namespace CadAiDesigner
                     return;
                 }
 
+                MahalCfg cfg;
+                if (!AskMahalCfg(ed, db, doc, false, out cfg)) return;
+
                 PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nPlan\u0131 se\u00e7in (oda etiketleri, \u00e7izgiler, bloklar): " });
                 if (sr.Status != PromptStatus.OK) return;
                 ObjectId[] ids = sr.Value.GetObjectIds();
 
-                bool withVis = false; string labelBlock = null;
-                // no further prompts — Enter defaults
+                bool withVis = false;
 
                 string path, summary;
                 using (doc.LockDocument())
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     List<Room> rooms; List<Hit> hits;
-                    BuildFromSelection(ed, tx, db, ids, withVis, labelBlock, traced, out rooms, out hits);
+                    BuildFromSelection(ed, tx, db, ids, withVis, cfg, traced, out rooms, out hits);
                     if (rooms.Count == 0) { ed.WriteMessage("\nOda bulunamad\u0131 (kapal\u0131 alan / etiket yok).\n"); return; }
                     path = WriteExcel(doc, rooms, hits, out summary);
                     tx.Commit();
@@ -158,23 +182,8 @@ namespace CadAiDesigner
             if (vr.Status == PromptStatus.Cancel) return false;
             bool withVis = vr.Status == PromptStatus.OK && NormKey(vr.StringResult) == "evet";
 
-            string labelBlock = null;
-            PromptResult lr = ed.GetKeywords(new PromptKeywordOptions("\nMahal etiket blo\u011fu ad\u0131 verilsin mi? [Evet/Hayir] <Hayir>: ", "Evet Hayir") { AllowNone = true });
-            if (lr.Status == PromptStatus.Cancel) return false;
-            if (lr.Status == PromptStatus.OK && NormKey(lr.StringResult) == "evet")
-            {
-                PromptEntityOptions leo = new PromptEntityOptions("\nMahal etiket blo\u011funu se\u00e7in: ");
-                leo.SetRejectMessage("\nBlok de\u011fil."); leo.AddAllowedClass(typeof(BlockReference), false);
-                PromptEntityResult ler = ed.GetEntity(leo);
-                if (ler.Status != PromptStatus.OK) return false;
-                using (Transaction lt = db.TransactionManager.StartOpenCloseTransaction())
-                {
-                    BlockReference lbr = (BlockReference)lt.GetObject(ler.ObjectId, OpenMode.ForRead);
-                    labelBlock = EffName(lt, lbr);
-                    lt.Commit();
-                }
-                ed.WriteMessage("\nMahal etiket blo\u011fu: " + labelBlock);
-            }
+            MahalCfg cfg;
+            if (!AskMahalCfg(ed, db, doc, true, out cfg)) return false;
 
             bool outCol = false;
             if (!buildingId.IsNull)
@@ -212,9 +221,9 @@ namespace CadAiDesigner
                 }
 
                 HashSet<ObjectId> labelIds;
-                NameRoomsFromModel(tx, db, rooms, labelBlock, out labelIds);
+                NameRoomsFromModel(tx, db, rooms, cfg, out labelIds);
 
-                List<Hit> hits = CollectHits(tx, db, rooms, building, only, withVis, outCol, labelIds, labelBlock);
+                List<Hit> hits = CollectHits(tx, db, rooms, building, only, withVis, outCol, labelIds, cfg);
                 path = WriteExcel(doc, rooms, hits, out summary, outCol && building != null);
                 tx.Commit();
             }
@@ -225,7 +234,7 @@ namespace CadAiDesigner
         }
 
         static void BuildFromSelection(Editor ed, Transaction tx, Database db, ObjectId[] ids,
-            bool withVis, string labelBlock, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits)
+            bool withVis, MahalCfg cfg, List<DBObjectCollection> traced, out List<Room> rooms, out List<Hit> hits)
         {
             List<ObjectId> closedPl = new List<ObjectId>();
             List<object> segs = new List<object>();
@@ -243,13 +252,21 @@ namespace CadAiDesigner
                     BlockReference br = ent as BlockReference;
                     if (br == null) continue;
                     string bn = EffName(tx, br);
-                    bool isNamedLabel = !string.IsNullOrEmpty(labelBlock) && string.Equals(bn, labelBlock, StringComparison.OrdinalIgnoreCase);
+                    bool pinned = cfg != null && !string.IsNullOrEmpty(cfg.BlockName);
+                    bool isLabelBlk = pinned && string.Equals(bn, cfg.BlockName, StringComparison.OrdinalIgnoreCase);
                     string mahal; double pri;
-                    if (TryMahalLabel(tx, br, out mahal, out pri) || isNamedLabel)
+                    if (pinned)
                     {
-                        if (mahal == null && isNamedLabel) { /* configured block but empty attrs — still exclude & try trace */ }
-                        if (mahal != null)
-                            labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        if (isLabelBlk)
+                        {
+                            labelIds.Add(id);
+                            if (TryMahalLabel(tx, br, cfg, out mahal, out pri) && mahal != null)
+                                labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        }
+                    }
+                    else if (TryMahalLabel(tx, br, null, out mahal, out pri) && mahal != null)
+                    {
+                        labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
                         labelIds.Add(id);
                     }
                     if (Keep(tx, br)) blocks.Add(br);
@@ -305,7 +322,7 @@ namespace CadAiDesigner
             foreach (BlockReference br in blocks)
             {
                 if (labelIds.Contains(br.ObjectId)) continue;
-                if (!string.IsNullOrEmpty(labelBlock) && string.Equals(EffName(tx, br), labelBlock, StringComparison.OrdinalIgnoreCase)) continue;
+                if (cfg != null && !string.IsNullOrEmpty(cfg.BlockName) && string.Equals(EffName(tx, br), cfg.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
                 Point2d p = new Point2d(br.Position.X, br.Position.Y);
                 int ri = -1;
                 for (int i = 0; i < rooms.Count; i++)
@@ -316,24 +333,135 @@ namespace CadAiDesigner
             hits = Dedupe(hits);
         }
 
-        /// <summary>Build room name from attributes: preferred name tag + optional NO/NUMARA -> "101 Salon".</summary>
-        static bool TryMahalLabel(Transaction tx, BlockReference br, out string name, out double pri)
+        /// <summary>Ask for mahal label block + name/number tags; remember per drawing. Enter = automatic (heuristics). force=true always re-asks (Ayarlar).</summary>
+        static bool AskMahalCfg(Editor ed, Database db, Document doc, bool force, out MahalCfg cfg)
+        {
+            cfg = null;
+            string key = MemKey(doc);
+            MahalCfg remembered;
+            if (!force && MahalMem.TryGetValue(key, out remembered) && remembered != null && !string.IsNullOrEmpty(remembered.BlockName))
+            {
+                cfg = remembered;
+                ed.WriteMessage("\nMahal etiketi (bellek): " + cfg + " — de\u011fi\u015ftirmek i\u00e7in Ayarlar.\n");
+                return true;
+            }
+
+            PromptEntityOptions eo = new PromptEntityOptions("\nMahal etiket blo\u011funu se\u00e7in (Enter = otomatik): ") { AllowNone = true };
+            eo.SetRejectMessage("\nBlok de\u011fil."); eo.AddAllowedClass(typeof(BlockReference), false);
+            PromptEntityResult er = ed.GetEntity(eo);
+            if (er.Status == PromptStatus.Cancel) return false;
+            if (er.Status == PromptStatus.None)
+            {
+                // automatic: clear pinned cfg for this drawing so heuristics apply
+                MahalMem.Remove(key);
+                cfg = null;
+                ed.WriteMessage("\nMahal: otomatik (MAHAL/ODA/ROOM attribute veya TEXT).\n");
+                return true;
+            }
+            if (er.Status != PromptStatus.OK) return false;
+
+            List<string> tags = new List<string>();
+            string bname;
+            using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
+            {
+                BlockReference br = (BlockReference)tx.GetObject(er.ObjectId, OpenMode.ForRead);
+                bname = EffName(tx, br);
+                foreach (ObjectId aid in br.AttributeCollection)
+                {
+                    AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
+                    if (ar == null || string.IsNullOrWhiteSpace(ar.Tag)) continue;
+                    if (!tags.Any(x => string.Equals(x, ar.Tag, StringComparison.OrdinalIgnoreCase))) tags.Add(ar.Tag);
+                }
+                tx.Commit();
+            }
+            if (tags.Count == 0) { ed.WriteMessage("\nSe\u00e7ilen blokta attribute yok.\n"); return false; }
+
+            string nameTag = PickTag(ed, "\nOda ad\u0131 attribute etiketi", tags, PreferTag(tags, NameTags));
+            if (nameTag == null) return false;
+            List<string> numChoices = tags.Where(x => !string.Equals(x, nameTag, StringComparison.OrdinalIgnoreCase)).ToList();
+            string numTag = null;
+            if (numChoices.Count > 0)
+            {
+                numTag = PickTag(ed, "\nNumara attribute etiketi (Enter = yok)", numChoices, PreferTag(numChoices, NumTags), allowNone: true);
+                if (numTag == null) return false; // cancel
+                if (numTag.Length == 0) numTag = null;
+            }
+
+            cfg = new MahalCfg { BlockName = bname, NameTag = nameTag, NumTag = numTag };
+            MahalMem[key] = cfg;
+            ed.WriteMessage("\nMahal etiketi kaydedildi: " + cfg + "\n");
+            return true;
+        }
+
+        static string PreferTag(List<string> tags, string[] prefer)
+        {
+            foreach (string p in prefer)
+                foreach (string t in tags)
+                    if (TrayKesif.Norm(t) == p || TrayKesif.Norm(t).Contains(p)) return t;
+            return tags[0];
+        }
+
+        /// <summary>Returns chosen tag; empty string if allowNone+Enter; null if cancel.</summary>
+        static string PickTag(Editor ed, string msg, List<string> tags, string def, bool allowNone = false)
+        {
+            if (tags.Count == 1 && !allowNone) return tags[0];
+            PromptKeywordOptions ko = new PromptKeywordOptions(msg) { AllowNone = allowNone };
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int i = 0;
+            foreach (string tag in tags)
+            {
+                string g = new string(tag.Where(char.IsLetterOrDigit).ToArray());
+                if (string.IsNullOrEmpty(g) || char.IsDigit(g[0])) g = "T" + g;
+                string baseG = g; int n = 2;
+                while (!used.Add(g)) g = baseG + (n++);
+                // AutoCAD keyword global max ~64; keep short
+                if (g.Length > 32) g = g.Substring(0, 32);
+                ko.Keywords.Add(g, g, tag);
+                map[g] = tag;
+                i++;
+            }
+            if (allowNone) { ko.Keywords.Add("Yok", "Yok", "Yok"); map["Yok"] = ""; }
+            string defG = map.FirstOrDefault(kv => string.Equals(kv.Value, def, StringComparison.OrdinalIgnoreCase)).Key;
+            if (string.IsNullOrEmpty(defG) && allowNone) defG = "Yok";
+            if (string.IsNullOrEmpty(defG)) defG = map.Keys.First();
+            ko.Keywords.Default = defG;
+            ko.AppendKeywordsToMessage = true;
+            PromptResult r = ed.GetKeywords(ko);
+            if (r.Status == PromptStatus.Cancel) return null;
+            if (r.Status == PromptStatus.None) return allowNone ? "" : map[defG];
+            if (r.Status != PromptStatus.OK) return null;
+            string chosen;
+            return map.TryGetValue(r.StringResult, out chosen) ? chosen : r.StringResult;
+        }
+
+        /// <summary>Build room name from attributes. cfg tags if set; else heuristics. "101 Salon" when number present.</summary>
+        static bool TryMahalLabel(Transaction tx, BlockReference br, MahalCfg cfg, out string name, out double pri)
         {
             name = null; pri = 1;
             if (br.AttributeCollection == null || br.AttributeCollection.Count == 0) return false;
             string nm = null, num = null; double h = 1;
             string first = null;
+            string wantName = cfg != null ? cfg.NameTag : null;
+            string wantNum = cfg != null ? cfg.NumTag : null;
             foreach (ObjectId aid in br.AttributeCollection)
             {
                 AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
                 if (ar == null) continue;
                 string val = CleanLabel(AttPlain(ar)); if (val == null) continue;
                 if (first == null) first = val;
-                string tag = TrayKesif.Norm(ar.Tag);
-                if (IsNameTag(tag) && nm == null) { nm = val; if (ar.Height > 0) h = ar.Height; }
-                if (IsNumTag(tag) && num == null) num = val;
+                if (!string.IsNullOrEmpty(wantName) && string.Equals(ar.Tag, wantName, StringComparison.OrdinalIgnoreCase))
+                { nm = val; if (ar.Height > 0) h = ar.Height; }
+                if (!string.IsNullOrEmpty(wantNum) && string.Equals(ar.Tag, wantNum, StringComparison.OrdinalIgnoreCase))
+                    num = val;
+                if (wantName == null)
+                {
+                    string tag = TrayKesif.Norm(ar.Tag);
+                    if (IsNameTag(tag) && nm == null) { nm = val; if (ar.Height > 0) h = ar.Height; }
+                    if (IsNumTag(tag) && num == null) num = val;
+                }
             }
-            if (nm == null) nm = first;
+            if (nm == null && wantName == null) nm = first;
             if (nm == null) return false;
             if (num != null && !nm.StartsWith(num + " ", StringComparison.OrdinalIgnoreCase) && !string.Equals(nm, num, StringComparison.OrdinalIgnoreCase))
                 name = num + " " + nm;
@@ -611,12 +739,13 @@ namespace CadAiDesigner
             }
         }
 
-        static void NameRoomsFromModel(Transaction tx, Database db, List<Room> rooms, string labelBlock, out HashSet<ObjectId> labelIds)
+        static void NameRoomsFromModel(Transaction tx, Database db, List<Room> rooms, MahalCfg cfg, out HashSet<ObjectId> labelIds)
         {
             labelIds = new HashSet<ObjectId>();
             BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
             BlockTableRecord ms = (BlockTableRecord)tx.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
             List<Label> labels = new List<Label>();
+            bool pinned = cfg != null && !string.IsNullOrEmpty(cfg.BlockName);
             foreach (ObjectId id in ms)
             {
                 string dxf = id.ObjectClass.DxfName;
@@ -625,11 +754,20 @@ namespace CadAiDesigner
                     BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
                     if (br == null) continue;
                     string bn = EffName(tx, br);
-                    bool isNamed = !string.IsNullOrEmpty(labelBlock) && string.Equals(bn, labelBlock, StringComparison.OrdinalIgnoreCase);
                     string mahal; double pri;
-                    if (TryMahalLabel(tx, br, out mahal, out pri) || isNamed)
+                    if (pinned)
                     {
-                        if (mahal != null) labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        if (!string.Equals(bn, cfg.BlockName, StringComparison.OrdinalIgnoreCase)) { /* not label */ }
+                        else
+                        {
+                            labelIds.Add(id);
+                            if (TryMahalLabel(tx, br, cfg, out mahal, out pri) && mahal != null)
+                                labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
+                        }
+                    }
+                    else if (TryMahalLabel(tx, br, null, out mahal, out pri) && mahal != null)
+                    {
+                        labels.Add(new Label { P = new Point2d(br.Position.X, br.Position.Y), Name = mahal, Pri = 10000 + pri, BlockId = id, BlockName = bn });
                         labelIds.Add(id);
                     }
                 }
@@ -649,7 +787,7 @@ namespace CadAiDesigner
             foreach (ObjectId id in used) labelIds.Add(id);
         }
 
-        static List<Hit> CollectHits(Transaction tx, Database db, List<Room> rooms, List<Point2d> building, HashSet<ObjectId> only, bool withVis, bool outCol, HashSet<ObjectId> labelIds, string labelBlock)
+        static List<Hit> CollectHits(Transaction tx, Database db, List<Room> rooms, List<Point2d> building, HashSet<ObjectId> only, bool withVis, bool outCol, HashSet<ObjectId> labelIds, MahalCfg cfg)
         {
             List<Hit> hits = new List<Hit>();
             BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -661,7 +799,7 @@ namespace CadAiDesigner
                 if (labelIds != null && labelIds.Contains(id)) continue;
                 BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
                 if (br == null || !Keep(tx, br)) continue;
-                if (!string.IsNullOrEmpty(labelBlock) && string.Equals(EffName(tx, br), labelBlock, StringComparison.OrdinalIgnoreCase)) continue;
+                if (cfg != null && !string.IsNullOrEmpty(cfg.BlockName) && string.Equals(EffName(tx, br), cfg.BlockName, StringComparison.OrdinalIgnoreCase)) continue;
                 Point2d p = new Point2d(br.Position.X, br.Position.Y);
                 if (building != null && !ArmaturGeo.Inside(building, p)) continue;
                 int ri = -1;
