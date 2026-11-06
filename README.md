@@ -1,200 +1,201 @@
-# AutoCAD AI Designer V4 — AutoCAD 2022
+# AutoCAD AI Designer V4 â AutoCAD 2022
 
-AutoCAD içinde dockable bir sohbet paneli: doğal dille istek yazarsınız, yapay zekâ **öneri planı** üretir, plan çizimde **renkli hayalet önizleme** olarak görünür, siz onaylarsınız, değişiklik **tek adımda** uygulanır ve **tek UNDO ile geri alınır**.
+AutoCAD iÃ§inde dockable bir sohbet paneli: doÄal dille istek yazarsÄ±nÄ±z, yapay zekÃ¢ **Ã¶neri planÄ±** Ã¼retir, plan Ã§izimde **renkli hayalet Ã¶nizleme** olarak gÃ¶rÃ¼nÃ¼r, siz onaylarsÄ±nÄ±z, deÄiÅiklik **tek adÄ±mda** uygulanÄ±r ve **tek UNDO ile geri alÄ±nÄ±r**.
 
-> **Önemli (dürüst not):** Kod bu ortamda gerçek AutoCAD 2022 DLL'leriyle derlenemedi. Doğrulananlar: Python servisi (19 birim test), C# kodunun söz dizimi/tür kontrolü (AutoCAD API'si taklit edilerek) ve doğrulama mantığı (mono üzerinde çalıştırıldı). AutoCAD'e özgü davranış (panel, seçim, önizleme, işlem) **sizin makinenizde ilk kez çalışacak**. İlk denemeyi bir DWG **kopyasında** yapın.
+> **Ãnemli (dÃ¼rÃ¼st not):** Kod bu ortamda gerÃ§ek AutoCAD 2022 DLL'leriyle derlenemedi. DoÄrulananlar: Python servisi (19 birim test), C# kodunun sÃ¶z dizimi/tÃ¼r kontrolÃ¼ (AutoCAD API'si taklit edilerek) ve doÄrulama mantÄ±ÄÄ± (mono Ã¼zerinde Ã§alÄ±ÅtÄ±rÄ±ldÄ±). AutoCAD'e Ã¶zgÃ¼ davranÄ±Å (panel, seÃ§im, Ã¶nizleme, iÅlem) **sizin makinenizde ilk kez Ã§alÄ±Åacak**. Ä°lk denemeyi bir DWG **kopyasÄ±nda** yapÄ±n.
 
-## V3'e göre neler değişti
+## V3'e gÃ¶re neler deÄiÅti
 | Alan | V3 | V4 |
 |---|---|---|
-| Kurulum | 2 terminal, token ortam değişkeni, her seferinde NETLOAD | `install.ps1` tek komut; AutoCAD açılınca otomatik yüklenir |
-| Servis | Elle başlatılıyordu | Eklenti gizli başlatır, rastgele port+token, AutoCAD kapanınca kendini kapatır |
-| API anahtarı | Ortam değişkeni | Panelden girilir, Windows DPAPI ile şifreli saklanır |
-| Seçim | `SelectImplied` (panel odaktayken güvenilmez) | `Nesne seç` düğmesi → gerçek AutoCAD komutu |
-| Uygulama | Modeless koddan yazma | Gerçek komut içinde tek transaction → **tek UNDO**, hata olursa çizim değişmez |
-| Önizleme | Sadece metin | Transient grafik hayaleti + Türkçe işlem özeti |
-| İşlemler | taşı, katman, çizgi, daire | + kopyala, döndür, ölçekle, katman oluştur, polyline, dikdörtgen, yazı, blok ekle |
-| Konuşma | Her istek bağımsız | Çok turlu sohbet belleği |
-| Model hatası | Düz hata | Geçersiz plan otomatik bir kez düzeltilir; anlaşılır Türkçe hata (kota, anahtar, model) |
-| Yedek | DWG'nin yanına çöp dosya | `%LOCALAPPDATA%\CadAiDesigner\backups` (son 30) |
-| Düzeltilen hatalar | bkz. `DEGISIKLIKLER.md` | |
+| Kurulum | 2 terminal, token ortam deÄiÅkeni, her seferinde NETLOAD | `install.ps1` tek komut; AutoCAD aÃ§Ä±lÄ±nca otomatik yÃ¼klenir |
+| Servis | Elle baÅlatÄ±lÄ±yordu | Eklenti gizli baÅlatÄ±r, rastgele port+token, AutoCAD kapanÄ±nca kendini kapatÄ±r |
+| API anahtarÄ± | Ortam deÄiÅkeni | Panelden girilir, Windows DPAPI ile Åifreli saklanÄ±r |
+| SeÃ§im | `SelectImplied` (panel odaktayken gÃ¼venilmez) | `Nesne seÃ§` dÃ¼Ämesi â gerÃ§ek AutoCAD komutu |
+| Uygulama | Modeless koddan yazma | GerÃ§ek komut iÃ§inde tek transaction â **tek UNDO**, hata olursa Ã§izim deÄiÅmez |
+| Ãnizleme | Sadece metin | Transient grafik hayaleti + TÃ¼rkÃ§e iÅlem Ã¶zeti |
+| Ä°Ålemler | taÅÄ±, katman, Ã§izgi, daire | + kopyala, dÃ¶ndÃ¼r, Ã¶lÃ§ekle, katman oluÅtur, polyline, dikdÃ¶rtgen, yazÄ±, blok ekle |
+| KonuÅma | Her istek baÄÄ±msÄ±z | Ãok turlu sohbet belleÄi |
+| Model hatasÄ± | DÃ¼z hata | GeÃ§ersiz plan otomatik bir kez dÃ¼zeltilir; anlaÅÄ±lÄ±r TÃ¼rkÃ§e hata (kota, anahtar, model) |
+| Yedek | DWG'nin yanÄ±na Ã§Ã¶p dosya | `%LOCALAPPDATA%\CadAiDesigner\backups` (son 30) |
+| DÃ¼zeltilen hatalar | bkz. `DEGISIKLIKLER.md` | |
 
-## Yapay zekâ sağlayıcısı (herhangi bir API)
-Panel → **Ayarlar** → *Yapay zekâ sağlayıcı* listesinden seçin; Base URL ve model otomatik dolar, anahtar her sağlayıcı için ayrı ve şifreli saklanır.
+## Yapay zekÃ¢ saÄlayÄ±cÄ±sÄ± (herhangi bir API)
+Panel â **Ayarlar** â *Yapay zekÃ¢ saÄlayÄ±cÄ±* listesinden seÃ§in; Base URL ve model otomatik dolar, anahtar her saÄlayÄ±cÄ± iÃ§in ayrÄ± ve Åifreli saklanÄ±r.
 
-| Sağlayıcı | Ücret | Not |
+| SaÄlayÄ±cÄ± | Ãcret | Not |
 |---|---|---|
-| Google Gemini | **Ücretsiz anahtar** (aistudio.google.com/apikey) | Önerilen; model `gemini-2.5-flash` |
-| Groq | Ücretsiz anahtar (console.groq.com) | Hızlı; dakikalık limitleri düşük |
-| OpenRouter | `:free` modeller ücretsiz | Tek anahtarla çok model |
-| Ollama | Ücretsiz, yerel, anahtarsız | ollama.com + `ollama pull qwen2.5:7b`; güçlü GPU önerilir |
-| Codex CLI | ChatGPT aboneliğiniz | API anahtarı gerekmez; bir kez `codex login` |
-| Cursor CLI | Cursor aboneliğiniz | `cursor-agent login` |
+| Google Gemini | **Ãcretsiz anahtar** (aistudio.google.com/apikey) | Ãnerilen; model `gemini-2.5-flash` |
+| Groq | Ãcretsiz anahtar (console.groq.com) | HÄ±zlÄ±; dakikalÄ±k limitleri dÃ¼ÅÃ¼k |
+| OpenRouter | `:free` modeller Ã¼cretsiz | Tek anahtarla Ã§ok model |
+| Ollama | Ãcretsiz, yerel, anahtarsÄ±z | ollama.com + `ollama pull qwen2.5:7b`; gÃ¼Ã§lÃ¼ GPU Ã¶nerilir |
+| Codex CLI | ChatGPT aboneliÄiniz | API anahtarÄ± gerekmez; bir kez `codex login` |
+| Cursor CLI | Cursor aboneliÄiniz | `cursor-agent login` |
 | OpenAI / DeepSeek / Anthropic | Kredi gerekir | |
-| Özel | — | Herhangi bir OpenAI uyumlu `/chat/completions` adresi |
+| Ãzel | â | Herhangi bir OpenAI uyumlu `/chat/completions` adresi |
 
-Hata mesajları ayrıştırılır: **kota/kredi bitti** (ödeme gerekir → başka sağlayıcı seçin), **istek sınırı** (biraz bekleyin), **anahtar geçersiz**.
+Hata mesajlarÄ± ayrÄ±ÅtÄ±rÄ±lÄ±r: **kota/kredi bitti** (Ã¶deme gerekir â baÅka saÄlayÄ±cÄ± seÃ§in), **istek sÄ±nÄ±rÄ±** (biraz bekleyin), **anahtar geÃ§ersiz**.
 ## Gereksinimler
-Windows 10/11 · AutoCAD **2022** · Visual Studio 2022 **Build Tools** (".NET masaüstü derleme araçları" + ".NET Framework 4.8 hedefleme paketi") · Python **3.9+** (PATH'te) · bir yapay zekâ sağlayıcısı (ücretsiz Gemini anahtarı, Ollama, Codex CLI veya OpenAI vb.).
+Windows 10/11 Â· AutoCAD **2022** Â· Visual Studio 2022 **Build Tools** (".NET masaÃ¼stÃ¼ derleme araÃ§larÄ±" + ".NET Framework 4.8 hedefleme paketi") Â· Python **3.9+** (PATH'te) Â· bir yapay zekÃ¢ saÄlayÄ±cÄ±sÄ± (Ã¼cretsiz Gemini anahtarÄ±, Ollama, Codex CLI veya OpenAI vb.).
 
 ## Kurulum
-1. Zip'i bir klasöre çıkarın (ör. `C:\AI-Agent-V4`).
-2. AutoCAD'i kapatın. PowerShell'de:
+1. Zip'i bir klasÃ¶re Ã§Ä±karÄ±n (Ã¶r. `C:\AI-Agent-V4`).
+2. AutoCAD'i kapatÄ±n. PowerShell'de:
    ```powershell
    cd C:\AI-Agent-V4
    powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
-   (AutoCAD farklı yerdeyse: `-AutoCADDir 'D:\Autodesk\AutoCAD 2022'`.) Betik testleri çalıştırır, derler ve `%APPDATA%\Autodesk\ApplicationPlugins\CadAiDesigner.bundle` altına kurar.
-3. AutoCAD'i açın → `AIDESIGNER` → panelde **Ayarlar** → API anahtarını girin → Kaydet.
+   (AutoCAD farklÄ± yerdeyse: `-AutoCADDir 'D:\Autodesk\AutoCAD 2022'`.) Betik testleri Ã§alÄ±ÅtÄ±rÄ±r, derler ve `%APPDATA%\Autodesk\ApplicationPlugins\CadAiDesigner.bundle` altÄ±na kurar.
+3. AutoCAD'i aÃ§Ä±n â `AIDESIGNER` â panelde **Ayarlar** â API anahtarÄ±nÄ± girin â Kaydet.
 
-Kaldırma: `.\uninstall.ps1` (ayarları da silmek için `-RemoveData`).
+KaldÄ±rma: `.\uninstall.ps1` (ayarlarÄ± da silmek iÃ§in `-RemoveData`).
 
-## Kullanım
-1. Bir DWG **kopyası** açın, kaydedin.
-2. Nesneleri seçin → panelde **Nesne seç**.
-3. İsteği yazın, **Ctrl+Enter**: ör. *"Seçilenleri X yönünde 500 birim kopyala"*, *"Seçili nesneleri DUVAR katmanına al, katman yoksa kırmızı oluştur"*, *"Seçilenleri sol kenara hizala"*, *"0,0 köşeli 4000×3000 dikdörtgen çiz"*.
-4. Önizlemeyi AutoCAD'de inceleyin (yeşil: değişen, sarı: kopya, camgöbeği: yeni) → **Onayla / Uygula**.
-5. Beğenmezseniz `Ctrl+Z` (tek adımda geri alır). Kaydetmek sizde.
+## KullanÄ±m
+1. Bir DWG **kopyasÄ±** aÃ§Ä±n, kaydedin.
+2. Nesneleri seÃ§in â panelde **Nesne seÃ§**.
+3. Ä°steÄi yazÄ±n, **Ctrl+Enter**: Ã¶r. *"SeÃ§ilenleri X yÃ¶nÃ¼nde 500 birim kopyala"*, *"SeÃ§ili nesneleri DUVAR katmanÄ±na al, katman yoksa kÄ±rmÄ±zÄ± oluÅtur"*, *"SeÃ§ilenleri sol kenara hizala"*, *"0,0 kÃ¶Åeli 4000Ã3000 dikdÃ¶rtgen Ã§iz"*.
+4. Ãnizlemeyi AutoCAD'de inceleyin (yeÅil: deÄiÅen, sarÄ±: kopya, camgÃ¶beÄi: yeni) â **Onayla / Uygula**.
+5. BeÄenmezseniz `Ctrl+Z` (tek adÄ±mda geri alÄ±r). Kaydetmek sizde.
 
-`AIDSELECT` ve `AIDAPPLY` panelin iç komutlarıdır, elle çalıştırmayın.
+`AIDSELECT` ve `AIDAPPLY` panelin iÃ§ komutlarÄ±dÄ±r, elle Ã§alÄ±ÅtÄ±rmayÄ±n.
 
-## Güvenlik ve gizlilik
-- Yalnızca izin listesindeki 12 işlem çalışır; silme, komut/script çalıştırma yoktur. Her plan hem Python'da hem C#'ta (yetkili) doğrulanır; seçili olmayan nesneye dokunulamaz; kilitli/dondurulmuş katman reddedilir.
-- Servis yalnızca `127.0.0.1`'de dinler, oturuma özel rastgele token ister, proxy'yi atlar.
-- **Seçili nesnelerin bilgisi (tür, katman, ölçü, metin içeriği) OpenAI'a gönderilir.** Gizli/kısıtlı çizimlerde kurumsal onay olmadan kullanmayın.
-- Günlükler: `%LOCALAPPDATA%\CadAiDesigner\logs` (istek metni ve uygulanan plan özeti; anahtar ve geometri yazılmaz).
+## GÃ¼venlik ve gizlilik
+- YalnÄ±zca izin listesindeki 12 iÅlem Ã§alÄ±ÅÄ±r; silme, komut/script Ã§alÄ±ÅtÄ±rma yoktur. Her plan hem Python'da hem C#'ta (yetkili) doÄrulanÄ±r; seÃ§ili olmayan nesneye dokunulamaz; kilitli/dondurulmuÅ katman reddedilir.
+- Servis yalnÄ±zca `127.0.0.1`'de dinler, oturuma Ã¶zel rastgele token ister, proxy'yi atlar.
+- **SeÃ§ili nesnelerin bilgisi (tÃ¼r, katman, Ã¶lÃ§Ã¼, metin iÃ§eriÄi) OpenAI'a gÃ¶nderilir.** Gizli/kÄ±sÄ±tlÄ± Ã§izimlerde kurumsal onay olmadan kullanmayÄ±n.
+- GÃ¼nlÃ¼kler: `%LOCALAPPDATA%\CadAiDesigner\logs` (istek metni ve uygulanan plan Ã¶zeti; anahtar ve geometri yazÄ±lmaz).
 
 ## Sorun giderme
-| Belirti | Çözüm |
+| Belirti | ÃÃ¶zÃ¼m |
 |---|---|
-| `AIDESIGNER` tanınmıyor | Kurulum sonrası AutoCAD'i yeniden açın; `SECURELOAD`/güven uyarısı çıkarsa "Always load" deyin |
-| "Python 3.9+ bulunamadı" | python.org'dan kurun (Add to PATH) veya Ayarlar'da `python.exe` yolunu girin. Microsoft Store'un sahte `python` kısayolu sayılmaz |
-| "Servis başlamadı" | Mesajdaki son satırlar nedeni gösterir; `%LOCALAPPDATA%\CadAiDesigner\logs\service.log` |
-| Kota/401/404 hatası | Mesaj Türkçe açıklar: kredi, anahtar veya model adı |
-| Önizleme görünmüyor | Planı iptal edip yeniden hazırlayın (`REGEN`); uygulama önizlemesiz de çalışır |
-| Derleme hatası `error CS...` | Satırı bana iletin; AutoCAD API'sine özgü bir uyumsuzluk olabilir |
+| `AIDESIGNER` tanÄ±nmÄ±yor | Kurulum sonrasÄ± AutoCAD'i yeniden aÃ§Ä±n; `SECURELOAD`/gÃ¼ven uyarÄ±sÄ± Ã§Ä±karsa "Always load" deyin |
+| "Python 3.9+ bulunamadÄ±" | python.org'dan kurun (Add to PATH) veya Ayarlar'da `python.exe` yolunu girin. Microsoft Store'un sahte `python` kÄ±sayolu sayÄ±lmaz |
+| "Servis baÅlamadÄ±" | Mesajdaki son satÄ±rlar nedeni gÃ¶sterir; `%LOCALAPPDATA%\CadAiDesigner\logs\service.log` |
+| Kota/401/404 hatasÄ± | Mesaj TÃ¼rkÃ§e aÃ§Ä±klar: kredi, anahtar veya model adÄ± |
+| Ãnizleme gÃ¶rÃ¼nmÃ¼yor | PlanÄ± iptal edip yeniden hazÄ±rlayÄ±n (`REGEN`); uygulama Ã¶nizlemesiz de Ã§alÄ±ÅÄ±r |
+| Derleme hatasÄ± `error CS...` | SatÄ±rÄ± bana iletin; AutoCAD API'sine Ã¶zgÃ¼ bir uyumsuzluk olabilir |
 
-Elle hata ayıklama: `scripts\dev-service.ps1 -LaunchAutoCAD`.
+Elle hata ayÄ±klama: `scripts\dev-service.ps1 -LaunchAutoCAD`.
 
-## Bilinen sınırlar
-- Önizleme her işlemi **orijinal geometriden** gösterir (aynı nesneye zincirleme işlem varsa yaklaşıktır); uygulama doğru sırayla yapılır.
-- Kopyalama `DeepClone` kullanır; dinamik blok parametreleri, xref içeriği ve annotative ayarlar özel olarak ele alınmaz.
-- Koordinatlar her zaman WCS ve çizim birimindedir; UCS döndürülmüşse model yine WCS'e göre hesaplar.
-- Seçim en fazla 100 nesne gönderir; çok büyük seçimlerde sonuç kalitesi düşer.
-- Yedek yalnızca son **kaydedilmiş** DWG'dir; kaydedilmemiş iş için UNDO kullanın.
-- Model geometriyi yanlış hesaplayabilir; önizlemeyi her zaman kontrol edin.
+## Bilinen sÄ±nÄ±rlar
+- Ãnizleme her iÅlemi **orijinal geometriden** gÃ¶sterir (aynÄ± nesneye zincirleme iÅlem varsa yaklaÅÄ±ktÄ±r); uygulama doÄru sÄ±rayla yapÄ±lÄ±r.
+- Kopyalama `DeepClone` kullanÄ±r; dinamik blok parametreleri, xref iÃ§eriÄi ve annotative ayarlar Ã¶zel olarak ele alÄ±nmaz.
+- Koordinatlar her zaman WCS ve Ã§izim birimindedir; UCS dÃ¶ndÃ¼rÃ¼lmÃ¼Åse model yine WCS'e gÃ¶re hesaplar.
+- SeÃ§im en fazla 100 nesne gÃ¶nderir; Ã§ok bÃ¼yÃ¼k seÃ§imlerde sonuÃ§ kalitesi dÃ¼Åer.
+- Yedek yalnÄ±zca son **kaydedilmiÅ** DWG'dir; kaydedilmemiÅ iÅ iÃ§in UNDO kullanÄ±n.
+- Model geometriyi yanlÄ±Å hesaplayabilir; Ã¶nizlemeyi her zaman kontrol edin.
 
-## Ticari ürün yolunda (kod dışı işler)
-Kod imzalama (Authenticode), MSI/Inno Setup kurulum paketi (Python'u PyInstaller ile tek `.exe` yapıp bağımsız kurulum), lisanslama/aktivasyon, çoklu AutoCAD sürümü testi (2023-2025 için .NET 8 geçişi), otomatik güncelleme, kullanım koşulları/gizlilik politikası, kendi backend'iniz üzerinden API anahtarı yönetimi ve Autodesk App Store yayın süreci.
-
-
-## Metraj, Keşif ve Revizyon (salt okunur)
-
-Çizimi değiştirmez. Üç yol:
-
-* Panelde **Metraj** düğmesi veya komut satırında `AIDMETRAJ` → kapsam (Tümü / Seçim / Katman), yazılar sayılsın mı, revizyon olarak kaydet (örn. `R1`), karşılaştır (Yok / kayıtlı revizyon / başka DWG).
-* Panelde doğal dil: "metraj çıkar", "E-KABLO katmanının metrajı", "bunu R2 olarak kaydet", "R1 ile R2 arasında ne değişti", "eski.dwg ile karşılaştır". AI salt okunur `takeoff` eylemi üretir; onay gerekmez.
-
-**Neler sayılır (yalnızca Model alanı):**
-* Bloklar: efektif ada göre adet; TAG/TIP/ÖLÇÜ/MODEL/GÜÇ/KESİT… öznitelikleri ve dinamik görünürlük/genişlik değerleri ayrı kalem oluşturur.
-* Kablo tavası (dinamik Uzunluk/Length/Boy/Distance parametresi olan ya da adında "tava/tray/kanal" geçen bloklar): genişliğe göre toplam metre (parametre değeri, yoksa X ölçeği × blok boyu).
-* Line/Polyline/Arc/Spline: katman başına toplam uzunluk (m). Kapalı polyline ve tarama: katman başına alan (m²). İsteğe bağlı yazı adedi.
-* Birimler INSUNITS'ten metreye çevrilir (tanımsızsa mm kabul edilir).
-
-**Keşif:** `%APPDATA%\CadAiDesigner\birim_fiyat.csv` (veya `.xlsx`), sütunlar `poz_no;kalem;birim;birim_fiyat` (`;` veya `,`; `1.234,50` biçimi olur). Kalem adı metraj kalemiyle aynıysa ya da metraj kaleminin içinde geçiyorsa eşleşir (Türkçe harf/büyük-küçük duyarsız). Dosya yoksa ilk metrajda çizimin kalemleriyle şablon oluşturulur. Fiyatı olmayan kalemler raporda listelenir. Örnek: `templates\birim_fiyat_sablon.csv`.
-
-**Çıktılar:**
-* Excel: DWG'nin yanında `<dwg>_metraj_<tarih>.xlsx` (sayfalar: Metraj, Keşif, Revizyon Farkı). Ek kütüphane gerekmez. DWG kaydedilmemişse/klasör yazılamıyorsa `%APPDATA%\CadAiDesigner\metraj`.
-* Revizyonlar: `<dwg klasörü>\<dwg>_revizyonlar\<etiket>.json`.
-* Fark tablosu: kalem, eski, yeni, fark (+/−), durum, tutar farkı.
-
-**Sınırlamalar:** iç içe bloklar ve XREF'ler açılmaz; Paper Space sayılmaz; kablo tavası köşe/dirsek parçaları ayrı kalem değildir; fiyat eşleşmesi metin tabanlıdır.
-## Attribute (etiket) blokları → Excel
-
-`AIDATTEXPORT` komutu, panelde **Attribute Excel** düğmesi veya panelde "etiket bloklarını excele aktar" isteği.
-
-- Kapsam: seçim varsa seçili bloklar; yoksa `Attributeli` (varsayılan) / `Tumbloklar` / `Blok` (çizimdeki attribute'lu blok adları listelenir, ad veya numara girilir) / `Secim`. İsteğe bağlı olarak pafta (layout) alanları da dahil edilir. Dinamik bloklar gerçek (efektif) adlarıyla gruplanır.
-- Çıktı: DWG'nin yanında `<dwg>_attribute_<tarih>.xlsx` (kaydedilmemiş çizimde `%APPDATA%\CadAiDesigner\metraj`), otomatik açılır.
-  - **Tümü** sayfası ve her blok adı için ayrı sayfa. Sütunlar: Blok, Katman, Handle, X, Y (+ pafta varsa Alan), sonra her attribute etiketi (tanımdaki sırayla; etiket adı ne olursa olsun).
-  - Sayısal görünen değerler (`12,5`, `12.5`, `1.234,5`) sayı olarak yazılır; sayısal sütunlara **TOPLAM** satırı eklenir (ör. KABLO METRAJI).
-  - Çok satırlı (MText) ve sabit (constant) attribute'lar da dahildir.
-  - İsteğe bağlı **Özet** sayfası: bir etikete göre gruplar (ör. `KABLO` → her kablo tipi için adet ve KABLO METRAJI toplamı).
-- Salt okunurdur; çizimde hiçbir şey değişmez. Esc her adımda güvenle iptal eder.
-
-## Tava yerleştirme (AIDTAVA / TAVA / KT)
-
-AI kullanmadan, polyline/çizgi ile çizilmiş plana `cabletray` bloğunu EN ve BOY ayarlı yerleştirir. Panelde **Tava Yerleştir** düğmesi de aynı komutu çalıştırır.
-
-1. Seçim: önceden seçili çizgi/polyline'lar; yoksa seçim istenir, `Tumu` ile plan katman(lar)ındaki tüm çizgi/polyline'lar (virgüllü liste, `*` = tümü; hatırlanır).
-2. Seçenekler (Enter = Devam): `[En/Yukseklik/Kalinlik/Kopyala/Mod/Baglanti/Devam]`
-   - **EN**: otomatik — paralel çift çizgi aralığından (50/100/150/200/300/400/500/600'e yuvarlanır, ±%15), tek çizgide polyline kalınlığından, yoksa son EN (varsayılan 300). `En` ile elle girilir (0 = otomatiğe dön).
-   - **Yukseklik / Kalinlik**: YUKSEKLIK/KALINLIK attribute'ları (varsayılan 40 / 2, hatırlanır). `Kopyala`: mevcut bir tavadan EN, yükseklik ve kalınlığı alır.
-   - **Mod**: `Otomatik` (çift çizgi varsa yalnız çiftler, uç kapama çizgileri yok sayılır; yoksa tek çizgi = tava ekseni), `Cift`, `Tek`.
-   - **Baglanti** (varsayılan Evet): ardından AIDBAGLANTI mantığıyla ek parçalar yalnızca yeni tavalar ve onlara değen mevcut tavalar için yerleştirilir.
-3. Her düz segmente bir blok: BOY = segment boyu, tava eksene ortalanır, soldan sağa/aşağıdan yukarı döndürülür, katman `E_CT` (yoksa oluşturulur). Yaylar kiriş olarak alınır. Mevcut bir tavayla çakışan segment atlanır (tekrar çalıştırmak güvenlidir).
-4. Hepsi tek UNDO adımıdır; Esc her soruda güvenle çıkar. Ayarlar `%LOCALAPPDATA%\CadAiDesigner\tava.json`.
-
-## Plandan keşif (AIDPLANKESIF / PK)
-
-Çizgi/polyline ile çizilmiş plandan, **hiç blok eklemeden ve çizimi değiştirmeden** kablo tavası + ek parça keşfi çıkarır. Panelde **Plandan Keşif** düğmesi; panelde "plandan keşif çıkar" isteği de aynı komutu başlatır.
-
-- Sorular AIDTAVA ile aynıdır (seçim veya `Tumu` + katmanlar, EN otomatik/elle, Yukseklik/Kalinlik, Mod; değerler `tava.json`'dan hatırlanır). Ek parçalar her zaman hesaplanır.
-- Hesap: AIDTAVA + AIDBAGLANTI bellekte birebir uygulanır (YD, YT, dal genişliğinde Yarım T, AD; leg/clearance kesimleri), sonuç ölçülür ve işlem geri alınır — çizime hiçbir şey yazılmaz, UNDO gerekmez. Bu yüzden sonuç, aynı plana AIDTAVA uygulandıktan sonraki AIDMETRAJ ile aynıdır (Drawing2 kopyasında doğrulandı). Çizimde zaten bulunan tavalar dikkate alınmaz.
-- Çıktı: metraj ile aynı kalem adları ve Excel biçimi, `birim_fiyat.csv` fiyatları; DWG'nin yanında `<dwg>_plankesif_<tarih>.xlsx`, otomatik açılır. Özet komut satırında ve panelde.
-
-## AIDHATCHFIX (tava hatch onarımı)
-
-Hatch'i bozuk görünen cabletray bloklarını (seçim veya `Tumu`) dinamik tanımdan yeniden yerleştirir; konum, açı, katman, EN/BOY ve attribute değerleri korunur. Sonrasında üçgen grip/STRETCH ile uzatma doğru çalışır. Teşhis: `AIDHATCHDIAG`.
-
-## Seçim bağlamı (sınırsız)
-
-Seçilen tüm nesneler yapay zekaya gönderilir (eski 100 sınırı kaldırıldı). 100'den büyük seçimler `selected_compact` tablosu olarak (handle, type, layer, block_name, x, y, z, rotation_deg, extents, props) kompakt gönderilir. `settings.json`: `MaxObjects` (0 = sınırsız, varsayılan) ve `CompactAbove` (100). Kırpma olursa bağlamda `selection_truncated` ile sayı belirtilir. Teşhis: `AIDCTXDIAG`.
-
-## Planlar arası hizalama: AIDREFNOKTA (RN) ve AIDPLANKOPYA (PKOPYA)
-
-- **Referans noktaları** (panel düğmesi veya `RN`): önce kaynak plandan bir nokta, sonra hedef plandaki aynı fiziksel noktayı fareyle (osnap) seçin; koordinat yazmak gerekmez. İsteğe bağlı ikinci çift dönme ve ölçek hesaplatır. Noktalar oturum boyunca çizim başına saklanır, panel durum çubuğunda görünür ve yapay zeka bağlamına `reference_points` / `reference_transform` olarak girer.
-- **AIDPLANKOPYA / PKOPYA**: seçili nesneleri (veya `Katman`) referans noktalarıyla kaynağın planından hedef plana kopyalar/taşır (bloklar, dönme, attribute korunur; tek UNDO). Yapay zeka da `plan_copy` eylemiyle bunu başlatır.
-
-## AIDOLCU (OLC): blok merkezlerinden ardışık ölçü
-
-Panelde "Blok ölçüsü" veya `OLC`: seçilen blokların (karma tipler) geometrik merkezleri (attribute hariç; `Nokta` ile ekleme noktası seçilebilir) bulunur, 1 birimden yakın merkezler birleştirilir, sıranın ana doğrultusu (yatay/düşey/açılı) hesaplanır ve ardışık döndürülmüş ölçü zinciri oluşturulur. Ölçü çizgisinin tarafı/mesafesi tıklanarak verilir (Enter = varsayılan). Geçerli ölçü stili ve katman kullanılır; `Toplam` ile toplam ölçü eklenir. Tek UNDO.
-
-## Attribute İçe Aktar (AIDATTIMPORT / ATI)
-
-AIDATTEXPORT ile alınan Excel'de değerleri düzenleyip kaydedin, sonra panelde 'Attribute İçe Aktar' (veya ATI). Dosya seçilir (varsayılan: DWG yanındaki en son *_attribute_*.xlsx), önizleme gösterilir, Evet ile tek UNDO adımında yazılır.
-- Eşleşme 'Handle (değiştirmeyin)' sütunu ile; handle yoksa/bozuksa blok adı + X/Y (0.01) ile.
-- Blok sayfaları ve Tümü birlikte okunur, aynı değer iki kez uygulanmaz; ikisi farklı değiştirildiyse blok sayfası kazanır (çakışma raporlanır). TOPLAM satırları ve Özet yok sayılır.
-- Yalnızca değeri değişen attribute etiketleri yazılır; Blok/Katman/Handle/X/Y/Alan ve sabit (constant) etiketler yazılmaz. Boşaltılan hücre değeri siler.
-- Sayılar: değer aynıysa çizimdeki metin korunur (1,5 / 60.0); yeni sayılarda ondalık ayırıcı eski değere göre, yoksa virgül; 60.0 -> 60.
-- Kilitli katmandaki bloklar atlanır ve raporlanır.
+## Ticari Ã¼rÃ¼n yolunda (kod dÄ±ÅÄ± iÅler)
+Kod imzalama (Authenticode), MSI/Inno Setup kurulum paketi (Python'u PyInstaller ile tek `.exe` yapÄ±p baÄÄ±msÄ±z kurulum), lisanslama/aktivasyon, Ã§oklu AutoCAD sÃ¼rÃ¼mÃ¼ testi (2023-2025 iÃ§in .NET 8 geÃ§iÅi), otomatik gÃ¼ncelleme, kullanÄ±m koÅullarÄ±/gizlilik politikasÄ±, kendi backend'iniz Ã¼zerinden API anahtarÄ± yÃ¶netimi ve Autodesk App Store yayÄ±n sÃ¼reci.
 
 
-## Armatür yerleşimi (AIDARMATUR / ARM)
+## Metraj, KeÅif ve Revizyon (salt okunur)
 
-Panel: 'Armatür yerleşimi'. Armatür bloğunu tıklayın, açık/kapalı polyline'ları (çoklu) seçin, x mesafesini girin veya iki nokta tıklayın.
-- Açık polyline (koridor): tek sıra; uçlardan x, armatürler arası ~2x (eşit dağıtılır), segment yönüne döndürülür.
-- Kapalı polyline (oda): en uzun kenara yönlü grid; duvardan x, aralık ~2x, ortalanır; poligon içinde ve duvara >= 0.9x olan noktalar kalır.
-- Kopyalar aynı bloğun yeni insert'i: ölçek, katman, attribute ve dinamik özellikler korunur. Tek UNDO adımı.
+Ãizimi deÄiÅtirmez. ÃÃ§ yol:
+
+* Panelde **Metraj** dÃ¼Ämesi veya komut satÄ±rÄ±nda `AIDMETRAJ` â kapsam (TÃ¼mÃ¼ / SeÃ§im / Katman), yazÄ±lar sayÄ±lsÄ±n mÄ±, revizyon olarak kaydet (Ã¶rn. `R1`), karÅÄ±laÅtÄ±r (Yok / kayÄ±tlÄ± revizyon / baÅka DWG).
+* Panelde doÄal dil: "metraj Ã§Ä±kar", "E-KABLO katmanÄ±nÄ±n metrajÄ±", "bunu R2 olarak kaydet", "R1 ile R2 arasÄ±nda ne deÄiÅti", "eski.dwg ile karÅÄ±laÅtÄ±r". AI salt okunur `takeoff` eylemi Ã¼retir; onay gerekmez.
+
+**Neler sayÄ±lÄ±r (yalnÄ±zca Model alanÄ±):**
+* Bloklar: efektif ada gÃ¶re adet; TAG/TIP/ÃLÃÃ/MODEL/GÃÃ/KESÄ°Tâ¦ Ã¶znitelikleri ve dinamik gÃ¶rÃ¼nÃ¼rlÃ¼k/geniÅlik deÄerleri ayrÄ± kalem oluÅturur.
+* Kablo tavasÄ± (dinamik Uzunluk/Length/Boy/Distance parametresi olan ya da adÄ±nda "tava/tray/kanal" geÃ§en bloklar): geniÅliÄe gÃ¶re toplam metre (parametre deÄeri, yoksa X Ã¶lÃ§eÄi Ã blok boyu).
+* Line/Polyline/Arc/Spline: katman baÅÄ±na toplam uzunluk (m). KapalÄ± polyline ve tarama: katman baÅÄ±na alan (mÂ²). Ä°steÄe baÄlÄ± yazÄ± adedi.
+* Birimler INSUNITS'ten metreye Ã§evrilir (tanÄ±msÄ±zsa mm kabul edilir).
+
+**KeÅif:** `%APPDATA%\CadAiDesigner\birim_fiyat.csv` (veya `.xlsx`), sÃ¼tunlar `poz_no;kalem;birim;birim_fiyat` (`;` veya `,`; `1.234,50` biÃ§imi olur). Kalem adÄ± metraj kalemiyle aynÄ±ysa ya da metraj kaleminin iÃ§inde geÃ§iyorsa eÅleÅir (TÃ¼rkÃ§e harf/bÃ¼yÃ¼k-kÃ¼Ã§Ã¼k duyarsÄ±z). Dosya yoksa ilk metrajda Ã§izimin kalemleriyle Åablon oluÅturulur. FiyatÄ± olmayan kalemler raporda listelenir. Ãrnek: `templates\birim_fiyat_sablon.csv`.
+
+**ÃÄ±ktÄ±lar:**
+* Excel: DWG'nin yanÄ±nda `<dwg>_metraj_<tarih>.xlsx` (sayfalar: Metraj, KeÅif, Revizyon FarkÄ±). Ek kÃ¼tÃ¼phane gerekmez. DWG kaydedilmemiÅse/klasÃ¶r yazÄ±lamÄ±yorsa `%APPDATA%\CadAiDesigner\metraj`.
+* Revizyonlar: `<dwg klasÃ¶rÃ¼>\<dwg>_revizyonlar\<etiket>.json`.
+* Fark tablosu: kalem, eski, yeni, fark (+/â), durum, tutar farkÄ±.
+
+**SÄ±nÄ±rlamalar:** iÃ§ iÃ§e bloklar ve XREF'ler aÃ§Ä±lmaz; Paper Space sayÄ±lmaz; kablo tavasÄ± kÃ¶Åe/dirsek parÃ§alarÄ± ayrÄ± kalem deÄildir; fiyat eÅleÅmesi metin tabanlÄ±dÄ±r.
+## Attribute (etiket) bloklarÄ± â Excel
+
+`AIDATTEXPORT` komutu, panelde **Attribute Excel** dÃ¼Ämesi veya panelde "etiket bloklarÄ±nÄ± excele aktar" isteÄi.
+
+- Kapsam: seÃ§im varsa seÃ§ili bloklar; yoksa `Attributeli` (varsayÄ±lan) / `Tumbloklar` / `Blok` (Ã§izimdeki attribute'lu blok adlarÄ± listelenir, ad veya numara girilir) / `Secim`. Ä°steÄe baÄlÄ± olarak pafta (layout) alanlarÄ± da dahil edilir. Dinamik bloklar gerÃ§ek (efektif) adlarÄ±yla gruplanÄ±r.
+- ÃÄ±ktÄ±: DWG'nin yanÄ±nda `<dwg>_attribute_<tarih>.xlsx` (kaydedilmemiÅ Ã§izimde `%APPDATA%\CadAiDesigner\metraj`), otomatik aÃ§Ä±lÄ±r.
+  - **TÃ¼mÃ¼** sayfasÄ± ve her blok adÄ± iÃ§in ayrÄ± sayfa. SÃ¼tunlar: Blok, Katman, Handle, X, Y (+ pafta varsa Alan), sonra her attribute etiketi (tanÄ±mdaki sÄ±rayla; etiket adÄ± ne olursa olsun).
+  - SayÄ±sal gÃ¶rÃ¼nen deÄerler (`12,5`, `12.5`, `1.234,5`) sayÄ± olarak yazÄ±lÄ±r; sayÄ±sal sÃ¼tunlara **TOPLAM** satÄ±rÄ± eklenir (Ã¶r. KABLO METRAJI).
+  - Ãok satÄ±rlÄ± (MText) ve sabit (constant) attribute'lar da dahildir.
+  - Ä°steÄe baÄlÄ± **Ãzet** sayfasÄ±: bir etikete gÃ¶re gruplar (Ã¶r. `KABLO` â her kablo tipi iÃ§in adet ve KABLO METRAJI toplamÄ±).
+- Salt okunurdur; Ã§izimde hiÃ§bir Åey deÄiÅmez. Esc her adÄ±mda gÃ¼venle iptal eder.
+
+## Tava yerleÅtirme (AIDTAVA / TAVA / KT)
+
+AI kullanmadan, polyline/Ã§izgi ile Ã§izilmiÅ plana `cabletray` bloÄunu EN ve BOY ayarlÄ± yerleÅtirir. Panelde **Tava YerleÅtir** dÃ¼Ämesi de aynÄ± komutu Ã§alÄ±ÅtÄ±rÄ±r.
+
+1. SeÃ§im: Ã¶nceden seÃ§ili Ã§izgi/polyline'lar; yoksa seÃ§im istenir, `Tumu` ile plan katman(lar)Ä±ndaki tÃ¼m Ã§izgi/polyline'lar (virgÃ¼llÃ¼ liste, `*` = tÃ¼mÃ¼; hatÄ±rlanÄ±r).
+2. SeÃ§enekler (Enter = Devam): `[En/Yukseklik/Kalinlik/Kopyala/Mod/Baglanti/Devam]`
+   - **EN**: otomatik â paralel Ã§ift Ã§izgi aralÄ±ÄÄ±ndan (50/100/150/200/300/400/500/600'e yuvarlanÄ±r, Â±%15), tek Ã§izgide polyline kalÄ±nlÄ±ÄÄ±ndan, yoksa son EN (varsayÄ±lan 300). `En` ile elle girilir (0 = otomatiÄe dÃ¶n).
+   - **Yukseklik / Kalinlik**: YUKSEKLIK/KALINLIK attribute'larÄ± (varsayÄ±lan 40 / 2, hatÄ±rlanÄ±r). `Kopyala`: mevcut bir tavadan EN, yÃ¼kseklik ve kalÄ±nlÄ±ÄÄ± alÄ±r.
+   - **Mod**: `Otomatik` (Ã§ift Ã§izgi varsa yalnÄ±z Ã§iftler, uÃ§ kapama Ã§izgileri yok sayÄ±lÄ±r; yoksa tek Ã§izgi = tava ekseni), `Cift`, `Tek`.
+   - **Baglanti** (varsayÄ±lan Evet): ardÄ±ndan AIDBAGLANTI mantÄ±ÄÄ±yla ek parÃ§alar yalnÄ±zca yeni tavalar ve onlara deÄen mevcut tavalar iÃ§in yerleÅtirilir.
+3. Her dÃ¼z segmente bir blok: BOY = segment boyu, tava eksene ortalanÄ±r, soldan saÄa/aÅaÄÄ±dan yukarÄ± dÃ¶ndÃ¼rÃ¼lÃ¼r, katman `E_CT` (yoksa oluÅturulur). Yaylar kiriÅ olarak alÄ±nÄ±r. Mevcut bir tavayla Ã§akÄ±Åan segment atlanÄ±r (tekrar Ã§alÄ±ÅtÄ±rmak gÃ¼venlidir).
+4. Hepsi tek UNDO adÄ±mÄ±dÄ±r; Esc her soruda gÃ¼venle Ã§Ä±kar. Ayarlar `%LOCALAPPDATA%\CadAiDesigner\tava.json`.
+
+## Plandan keÅif (AIDPLANKESIF / PK)
+
+Ãizgi/polyline ile Ã§izilmiÅ plandan, **hiÃ§ blok eklemeden ve Ã§izimi deÄiÅtirmeden** kablo tavasÄ± + ek parÃ§a keÅfi Ã§Ä±karÄ±r. Panelde **Plandan KeÅif** dÃ¼Ämesi; panelde "plandan keÅif Ã§Ä±kar" isteÄi de aynÄ± komutu baÅlatÄ±r.
+
+- Sorular AIDTAVA ile aynÄ±dÄ±r (seÃ§im veya `Tumu` + katmanlar, EN otomatik/elle, Yukseklik/Kalinlik, Mod; deÄerler `tava.json`'dan hatÄ±rlanÄ±r). Ek parÃ§alar her zaman hesaplanÄ±r.
+- Hesap: AIDTAVA + AIDBAGLANTI bellekte birebir uygulanÄ±r (YD, YT, dal geniÅliÄinde YarÄ±m T, AD; leg/clearance kesimleri), sonuÃ§ Ã¶lÃ§Ã¼lÃ¼r ve iÅlem geri alÄ±nÄ±r â Ã§izime hiÃ§bir Åey yazÄ±lmaz, UNDO gerekmez. Bu yÃ¼zden sonuÃ§, aynÄ± plana AIDTAVA uygulandÄ±ktan sonraki AIDMETRAJ ile aynÄ±dÄ±r (Drawing2 kopyasÄ±nda doÄrulandÄ±). Ãizimde zaten bulunan tavalar dikkate alÄ±nmaz.
+- ÃÄ±ktÄ±: metraj ile aynÄ± kalem adlarÄ± ve Excel biÃ§imi, `birim_fiyat.csv` fiyatlarÄ±; DWG'nin yanÄ±nda `<dwg>_plankesif_<tarih>.xlsx`, otomatik aÃ§Ä±lÄ±r. Ãzet komut satÄ±rÄ±nda ve panelde.
+
+## AIDHATCHFIX (tava hatch onarÄ±mÄ±)
+
+Hatch'i bozuk gÃ¶rÃ¼nen cabletray bloklarÄ±nÄ± (seÃ§im veya `Tumu`) dinamik tanÄ±mdan yeniden yerleÅtirir; konum, aÃ§Ä±, katman, EN/BOY ve attribute deÄerleri korunur. SonrasÄ±nda Ã¼Ã§gen grip/STRETCH ile uzatma doÄru Ã§alÄ±ÅÄ±r. TeÅhis: `AIDHATCHDIAG`.
+
+## SeÃ§im baÄlamÄ± (sÄ±nÄ±rsÄ±z)
+
+SeÃ§ilen tÃ¼m nesneler yapay zekaya gÃ¶nderilir (eski 100 sÄ±nÄ±rÄ± kaldÄ±rÄ±ldÄ±). 100'den bÃ¼yÃ¼k seÃ§imler `selected_compact` tablosu olarak (handle, type, layer, block_name, x, y, z, rotation_deg, extents, props) kompakt gÃ¶nderilir. `settings.json`: `MaxObjects` (0 = sÄ±nÄ±rsÄ±z, varsayÄ±lan) ve `CompactAbove` (100). KÄ±rpma olursa baÄlamda `selection_truncated` ile sayÄ± belirtilir. TeÅhis: `AIDCTXDIAG`.
+
+## Planlar arasÄ± hizalama: AIDREFNOKTA (RN) ve AIDPLANKOPYA (PKOPYA)
+
+- **Referans noktalarÄ±** (panel dÃ¼Ämesi veya `RN`): Ã¶nce kaynak plandan bir nokta, sonra hedef plandaki aynÄ± fiziksel noktayÄ± fareyle (osnap) seÃ§in; koordinat yazmak gerekmez. Ä°steÄe baÄlÄ± ikinci Ã§ift dÃ¶nme ve Ã¶lÃ§ek hesaplatÄ±r. Noktalar oturum boyunca Ã§izim baÅÄ±na saklanÄ±r, panel durum Ã§ubuÄunda gÃ¶rÃ¼nÃ¼r ve yapay zeka baÄlamÄ±na `reference_points` / `reference_transform` olarak girer.
+- **AIDPLANKOPYA / PKOPYA**: seÃ§ili nesneleri (veya `Katman`) referans noktalarÄ±yla kaynaÄÄ±n planÄ±ndan hedef plana kopyalar/taÅÄ±r (bloklar, dÃ¶nme, attribute korunur; tek UNDO). Yapay zeka da `plan_copy` eylemiyle bunu baÅlatÄ±r.
+
+## AIDOLCU (OLC): blok merkezlerinden ardÄ±ÅÄ±k Ã¶lÃ§Ã¼
+
+Panelde "Blok Ã¶lÃ§Ã¼sÃ¼" veya `OLC`: seÃ§ilen bloklarÄ±n (karma tipler) geometrik merkezleri (attribute hariÃ§; `Nokta` ile ekleme noktasÄ± seÃ§ilebilir) bulunur, 1 birimden yakÄ±n merkezler birleÅtirilir, sÄ±ranÄ±n ana doÄrultusu (yatay/dÃ¼Åey/aÃ§Ä±lÄ±) hesaplanÄ±r ve ardÄ±ÅÄ±k dÃ¶ndÃ¼rÃ¼lmÃ¼Å Ã¶lÃ§Ã¼ zinciri oluÅturulur. ÃlÃ§Ã¼ Ã§izgisinin tarafÄ±/mesafesi tÄ±klanarak verilir (Enter = varsayÄ±lan). GeÃ§erli Ã¶lÃ§Ã¼ stili ve katman kullanÄ±lÄ±r; `Toplam` ile toplam Ã¶lÃ§Ã¼ eklenir. Tek UNDO.
+
+## Attribute Ä°Ã§e Aktar (AIDATTIMPORT / ATI)
+
+AIDATTEXPORT ile alÄ±nan Excel'de deÄerleri dÃ¼zenleyip kaydedin, sonra panelde 'Attribute Ä°Ã§e Aktar' (veya ATI). Dosya seÃ§ilir (varsayÄ±lan: DWG yanÄ±ndaki en son *_attribute_*.xlsx), Ã¶nizleme gÃ¶sterilir, Evet ile tek UNDO adÄ±mÄ±nda yazÄ±lÄ±r.
+- EÅleÅme 'Handle (deÄiÅtirmeyin)' sÃ¼tunu ile; handle yoksa/bozuksa blok adÄ± + X/Y (0.01) ile.
+- Blok sayfalarÄ± ve TÃ¼mÃ¼ birlikte okunur, aynÄ± deÄer iki kez uygulanmaz; ikisi farklÄ± deÄiÅtirildiyse blok sayfasÄ± kazanÄ±r (Ã§akÄ±Åma raporlanÄ±r). TOPLAM satÄ±rlarÄ± ve Ãzet yok sayÄ±lÄ±r.
+- YalnÄ±zca deÄeri deÄiÅen attribute etiketleri yazÄ±lÄ±r; Blok/Katman/Handle/X/Y/Alan ve sabit (constant) etiketler yazÄ±lmaz. BoÅaltÄ±lan hÃ¼cre deÄeri siler.
+- SayÄ±lar: deÄer aynÄ±ysa Ã§izimdeki metin korunur (1,5 / 60.0); yeni sayÄ±larda ondalÄ±k ayÄ±rÄ±cÄ± eski deÄere gÃ¶re, yoksa virgÃ¼l; 60.0 -> 60.
+- Kilitli katmandaki bloklar atlanÄ±r ve raporlanÄ±r.
 
 
-### Armatür yerleşimi v2 (DIALux tarzı)
-- Alan: [Polyline/Icnokta] — Icnokta: oda içine tıklayın, sınır otomatik bulunur (BOUNDARY; bulunamazsa noktayı içeren en küçük kapalı polyline).
-- Yöntem: [Aralik/Adet/Mesafe]. Aralik: maks. aralık S (varsayılan 3000 mm) -> n = ceil(L/S), d = L/(2n), aralık 2d, duvar/uç = d. Adet: koridor n, oda NxM veya toplam. Mesafe: eski sabit x.
-- Dikdörtgen oda: yönler ayrı ayrı dA=A/(2nA), dB=B/(2nB). Düzensiz oda: en uzun kenara yönlü grid; gerçek duvar mesafesi < d olan noktalar içe kaydırılır, olmazsa atılır (raporlanır).
+## ArmatÃ¼r yerleÅimi (AIDARMATUR / ARM)
+
+Panel: 'ArmatÃ¼r yerleÅimi'. ArmatÃ¼r bloÄunu tÄ±klayÄ±n, aÃ§Ä±k/kapalÄ± polyline'larÄ± (Ã§oklu) seÃ§in, x mesafesini girin veya iki nokta tÄ±klayÄ±n.
+- AÃ§Ä±k polyline (koridor): tek sÄ±ra; uÃ§lardan x, armatÃ¼rler arasÄ± ~2x (eÅit daÄÄ±tÄ±lÄ±r), segment yÃ¶nÃ¼ne dÃ¶ndÃ¼rÃ¼lÃ¼r.
+- KapalÄ± polyline (oda): en uzun kenara yÃ¶nlÃ¼ grid; duvardan x, aralÄ±k ~2x, ortalanÄ±r; poligon iÃ§inde ve duvara >= 0.9x olan noktalar kalÄ±r.
+- Kopyalar aynÄ± bloÄun yeni insert'i: Ã¶lÃ§ek, katman, attribute ve dinamik Ã¶zellikler korunur. Tek UNDO adÄ±mÄ±.
+
+
+### ArmatÃ¼r yerleÅimi v2 (DIALux tarzÄ±)
+- Alan: [Polyline/Icnokta] â Icnokta: oda iÃ§ine tÄ±klayÄ±n, sÄ±nÄ±r otomatik bulunur (BOUNDARY; bulunamazsa noktayÄ± iÃ§eren en kÃ¼Ã§Ã¼k kapalÄ± polyline).
+- YÃ¶ntem: [Aralik/Adet/Mesafe]. Aralik: maks. aralÄ±k S (varsayÄ±lan 3000 mm) -> n = ceil(L/S), d = L/(2n), aralÄ±k 2d, duvar/uÃ§ = d. Adet: koridor n, oda NxM veya toplam. Mesafe: eski sabit x.
+- DikdÃ¶rtgen oda: yÃ¶nler ayrÄ± ayrÄ± dA=A/(2nA), dB=B/(2nB). DÃ¼zensiz oda: en uzun kenara yÃ¶nlÃ¼ grid; gerÃ§ek duvar mesafesi < d olan noktalar iÃ§e kaydÄ±rÄ±lÄ±r, olmazsa atÄ±lÄ±r (raporlanÄ±r).
 
 
 
-## Aydınlatma hesabı (lümen yöntemi)
-- `ARM` → Yöntem **Lux**: hedef aydınlık (oda 500 lx, koridor 100 lx), H (3 m), Φ (bloktaki LUMEN/LM/FLUX/AKI/ISIKAKISI attribute'undan, yoksa sorulur), MF 0,8, yansıma 0,7/0,5/0,2, çalışma düzlemi 0,85 m, koridor genişliği 2 m.
-  k = A/(h·P/2) (dikdörtgende = a·b/(h(a+b))), UF tablodan enterpolasyonla, n = ceil(E·A/(Φ·UF·MF)), oda oranına göre N×M grid (grid n'i yukarı tamamlayabilir).
-- Diğer yöntemlerde yerleşimden sonra "Aydınlatma hesabı?" sorulur. Rapor: Eort, Emin≈, Uo≈ (komut satırı + panel), isteğe bağlı MTEXT etiket ve Excel (`*_aydinlatma_*.xlsx`, servis `/xlsx`).
-- `AIDAYDHESAP` / `AHESAP` (panel: "Aydınlatma hesabı"): oda polyline / iç nokta + mevcut armatürler (yalnız oda içindekiler sayılır).
-- **Yaklaşıktır:** UF tablosu genel doğrudan-geniş dağılımlı armatür için tipik değerlerdir (CIBSE/LiTG tarzı üretici UF tabloları, zemin 0,2). Uo nokta hesabı Lambert kabulü, yalnız doğrudan ışık (E = Φh²/(πd⁴)), duvar bandı 0,5 m. Kesin sonuç için DIALux/üretici fotometrisi kullanın.
+## AydÄ±nlatma hesabÄ± (lÃ¼men yÃ¶ntemi)
+- `ARM` â YÃ¶ntem **Lux**: hedef aydÄ±nlÄ±k (oda 500 lx, koridor 100 lx), H (3 m), Î¦ (bloktaki LUMEN/LM/FLUX/AKI/ISIKAKISI attribute'undan, yoksa sorulur), MF 0,8, yansÄ±ma 0,7/0,5/0,2, Ã§alÄ±Åma dÃ¼zlemi 0,85 m, koridor geniÅliÄi 2 m.
+  k = A/(hÂ·P/2) (dikdÃ¶rtgende = aÂ·b/(h(a+b))), UF tablodan enterpolasyonla, n = ceil(EÂ·A/(Î¦Â·UFÂ·MF)), oda oranÄ±na gÃ¶re NÃM grid (grid n'i yukarÄ± tamamlayabilir).
+- DiÄer yÃ¶ntemlerde yerleÅimden sonra "AydÄ±nlatma hesabÄ±?" sorulur. Rapor: Eort, Eminâ, Uoâ (komut satÄ±rÄ± + panel), isteÄe baÄlÄ± MTEXT etiket ve Excel (`*_aydinlatma_*.xlsx`, servis `/xlsx`).
+- `AIDAYDHESAP` / `AHESAP` (panel: "AydÄ±nlatma hesabÄ±"): oda polyline / iÃ§ nokta + mevcut armatÃ¼rler (yalnÄ±z oda iÃ§indekiler sayÄ±lÄ±r).
+- **YaklaÅÄ±ktÄ±r:** UF tablosu genel doÄrudan-geniÅ daÄÄ±lÄ±mlÄ± armatÃ¼r iÃ§in tipik deÄerlerdir (CIBSE/LiTG tarzÄ± Ã¼retici UF tablolarÄ±, zemin 0,2). Uo nokta hesabÄ± Lambert kabulÃ¼, yalnÄ±z doÄrudan Ä±ÅÄ±k (E = Î¦hÂ²/(Ïdâ´)), duvar bandÄ± 0,5 m. Kesin sonuÃ§ iÃ§in DIALux/Ã¼retici fotometrisi kullanÄ±n.
 
-## Oda blok say�m� (AIDODASAYIM / OSAY)
+## Oda blok sayımı (AIDODASAYIM / OSAY)
 
-Panel: **Oda blok say�m�**. Kapal� oda polyline'lar�n� se�in (veya Icnokta ile i� nokta); iste�e ba�l� bina d�� s�n�r polyline'�; iste�e ba�l� blok se�imi (Enter = modeldeki t�m INSERT).
-- Oda ad�: oda i�indeki TEXT/MTEXT veya oda/room attribute; yoksa `Oda 1..n`. �� i�e odalarda en k���k i�eren odaya atan�r.
-- Blok ad�: dinamik blokta effective name; iste�e ba�l� g�r�n�rl�k durumu. Xref ve title/antet bloklar� atlan�r. Ayn� ad + ayn� konum (1 birim) bir kez say�l�r.
-- Bina s�n�r� verilirse d���ndaki (sembol listesi vb.) say�lmaz; iste�e ba�l� `Oda d��� (bina i�i)` s�tunu.
-- Excel (`*_odasayim_*.xlsx`, servis `/xlsx`): sat�rlar = bloklar, s�tunlar = odalar, sat�r/s�tun toplamlar� + genel toplam. Dosya �izimin yan�nda kaydedilir ve a��l�r.
+Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (tüm plan: çizgi, polyline, yazı, blok).
+- Odalar otomatik: seçimdeki kapalı polyline'lar; etiket (TEXT/MTEXT) konumundan TraceBoundary; TraceBoundary yoksa seçili çizgi/polyline/arc'tan düzlemsel yüz (grid odaları).
+- Etiket adı odaya yazılır (salon1…); etiketsiz ama blok içeren yüzler `Oda n`. Dış/bina ölçeğindeki yüz atılır. Oda dışındaki bloklar (sembol listesi) sayılmaz.
+- Aynı ad + aynı konum (1 birim) bir kez. Xref / title-antet atlanır.
+- `Ayarlar`: eski Polyline / İçnokta + bina sınırı akışı. Excel: `*_odasayim_*.xlsx` (`/xlsx`), satır=blok, sütun=oda, toplamlar.
+
