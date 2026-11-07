@@ -9,8 +9,8 @@ using Autodesk.AutoCAD.Runtime;
 
 namespace CadAiDesigner
 {
-    /// <summary>MLKOPYA / AIDMLKOPYA: clone one block-content MLeader onto each selected insert.
-    /// The arrow tip lands on the block insertion point (or bbox center); the label keeps the sample's offset from that tip.</summary>
+    /// <summary>MLKOPYA / AIDMLKOPYA: clone any MLeader (MText, block, or none) onto each selected insert.
+    /// The arrow tip lands on the block insertion point (or bbox center); TransformBy keeps the content offset.</summary>
     public class MlKopyaCommands
     {
         const double TolMm = 50;
@@ -30,9 +30,9 @@ namespace CadAiDesigner
             Database db = doc.Database;
             try
             {
-                PromptEntityOptions eo = new PromptEntityOptions("\nÖrnek etiket (blok içerikli multileader) seçin: ");
+                PromptEntityOptions eo = new PromptEntityOptions("\nÖrnek multileader seçin: ");
                 eo.SetRejectMessage("\nMultileader seçin. ");
-                eo.AddAllowedClass(typeof(MLeader), true);
+                eo.AddAllowedClass(typeof(MLeader), false);
                 PromptEntityResult er = ed.GetEntity(eo);
                 if (er.Status != PromptStatus.OK) return;
 
@@ -40,9 +40,9 @@ namespace CadAiDesigner
                 {
                     MLeader ml = tx.GetObject(er.ObjectId, OpenMode.ForRead) as MLeader;
                     Point3d tip;
-                    if (ml == null || !AttExport.IsBlockContent(ml) || !TryArrow(ml, out tip))
+                    if (ml == null || !TryArrow(ml, out tip))
                     {
-                        ed.WriteMessage("\nBlok içerikli ve oku olan bir multileader seçin.\n");
+                        ed.WriteMessage("\nSeçilen multileader'ın ok ucu yok.\n");
                         return;
                     }
                     tx.Commit();
@@ -65,9 +65,9 @@ namespace CadAiDesigner
                 {
                     MLeader sample = tx.GetObject(er.ObjectId, OpenMode.ForRead) as MLeader;
                     Point3d arrow;
-                    if (sample == null || !AttExport.IsBlockContent(sample) || !TryArrow(sample, out arrow))
+                    if (sample == null || !TryArrow(sample, out arrow))
                     {
-                        ed.WriteMessage("\nÖrnek etiket okunamadı.\n");
+                        ed.WriteMessage("\nSeçilen multileader'ın ok ucu yok.\n");
                         return;
                     }
                     LayerTableRecord lay = tx.GetObject(sample.LayerId, OpenMode.ForRead) as LayerTableRecord;
@@ -89,18 +89,9 @@ namespace CadAiDesigner
                         MLeader clone = null;
                         try
                         {
-                            BlockTableRecord space = tx.GetObject(br.OwnerId, OpenMode.ForWrite) as BlockTableRecord;
-                            clone = sample.Clone() as MLeader;
-                            if (clone == null || space == null)
-                            {
-                                try { if (clone != null) clone.Dispose(); } catch (System.Exception) { }
-                                failed++;
-                                continue;
-                            }
-                            space.AppendEntity(clone);
-                            tx.AddNewlyCreatedDBObject(clone, true);
-                            Translate(clone, target - arrow);
-                            try { CopyAttrs(tx, sample, clone); } catch (System.Exception) { }
+                            clone = PlaceCopy(tx, db, sample, br.OwnerId, target - arrow);
+                            if (clone == null) { failed++; continue; }
+                            if (AttExport.IsBlockContent(sample)) { try { CopyAttrs(tx, sample, clone); } catch (System.Exception) { } }
                             tips.Add(target);
                             foreach (Point3d p in AllArrows(clone)) tips.Add(p);
                             made++;
@@ -164,42 +155,32 @@ namespace CadAiDesigner
             return pts;
         }
 
-        /// <summary>Translates leader vertices and the block label by the same vector, so the label keeps its offset from the arrow.</summary>
-        static void Translate(MLeader ml, Vector3d d)
+        /// <summary>Deep-clones the sample (MText, frame, landing, style, block attributes), then moves the whole leader so its arrow tip lands on the target. Falls back to Clone().</summary>
+        static MLeader PlaceCopy(Transaction tx, Database db, MLeader sample, ObjectId ownerId, Vector3d delta)
         {
-            Point3d blockPos = Point3d.Origin;
-            bool hasBlock = false;
+            BlockTableRecord space = tx.GetObject(ownerId, OpenMode.ForWrite) as BlockTableRecord;
+            if (space == null) return null;
+            MLeader clone = null;
             try
             {
-                if (ml.ContentType == ContentType.BlockContent) { blockPos = ml.BlockPosition; hasBlock = true; }
+                ObjectIdCollection ids = new ObjectIdCollection();
+                ids.Add(sample.ObjectId);
+                IdMapping map = new IdMapping();
+                db.DeepCloneObjects(ids, ownerId, map, false);
+                IdPair pair = map[sample.ObjectId];
+                if (pair.IsCloned && !pair.Value.IsNull)
+                    clone = tx.GetObject(pair.Value, OpenMode.ForWrite) as MLeader;
             }
-            catch (System.Exception) { }
-            ArrayList leaders = null;
-            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { }
-            if (leaders != null)
-                foreach (object lo in leaders)
-                {
-                    ArrayList lines = null;
-                    try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(lo)); } catch (System.Exception) { continue; }
-                    if (lines == null) continue;
-                    foreach (object lio in lines)
-                    {
-                        int line = Convert.ToInt32(lio);
-                        int n = ml.VerticesCount(line);
-                        for (int i = 0; i < n; i++)
-                        {
-                            Point3d p = ml.GetVertex(line, i) + d;
-                            try { ml.SetVertex(line, i, p); }
-                            catch (System.Exception)
-                            {
-                                if (i == 0) ml.SetFirstVertex(line, p);
-                                else if (i == n - 1) ml.SetLastVertex(line, p);
-                                else throw;
-                            }
-                        }
-                    }
-                }
-            if (hasBlock) ml.BlockPosition = blockPos + d;
+            catch (System.Exception) { clone = null; }
+            if (clone == null)
+            {
+                clone = sample.Clone() as MLeader;
+                if (clone == null) return null;
+                space.AppendEntity(clone);
+                tx.AddNewlyCreatedDBObject(clone, true);
+            }
+            clone.TransformBy(Matrix3d.Displacement(delta));
+            return clone;
         }
 
         static void CopyAttrs(Transaction tx, MLeader src, MLeader dst)
