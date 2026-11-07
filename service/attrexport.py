@@ -41,7 +41,15 @@ def _union(lists):
 
 
 HANDLE_COL = 'Handle (değiştirmeyin)'
-FIXED = ['Blok', 'Katman', HANDLE_COL, 'X', 'Y']
+TYPE_COL = 'Tip'  # entity type: MLEADER (block content) or BLOK (insert). Exact header, so a TIP attribute tag is a different column.
+FIXED = ['Blok', TYPE_COL, 'Katman', HANDLE_COL, 'X', 'Y']
+
+
+def _etype(b):
+    t = b.get('type')
+    if t is None or str(t).strip() == '':
+        return 'BLOK'
+    return str(t).strip().upper()
 
 
 def _rows(blocks, tags, with_block=True):
@@ -52,7 +60,7 @@ def _rows(blocks, tags, with_block=True):
     seen = {t: False for t in tags}
     for b in blocks:
         av = dict((str(k), '' if v is None else str(v)) for k, v in b.get('attrs', []))
-        r = [b.get('block', ''), b.get('layer', ''), b.get('handle', ''), round(float(b.get('x') or 0), 3), round(float(b.get('y') or 0), 3)]
+        r = [b.get('block', ''), _etype(b), b.get('layer', ''), b.get('handle', ''), round(float(b.get('x') or 0), 3), round(float(b.get('y') or 0), 3)]
         if space:
             r.append(b.get('space') or 'Model')
         for t in tags:
@@ -144,6 +152,9 @@ def export(req):
         raise ValueError('export_path gerekli')
     metraj.write_xlsx(path, sheets)
     summary = '%d blok (%d blok adı, %d etiket) Excel\'e aktarıldı: %s' % (len(blocks), len(names), len(all_tags), path)
+    n_ml = sum(1 for b in blocks if _etype(b) == 'MLEADER')
+    if n_ml:
+        summary += '\nMultileader (blok içerik): %d. Tip sütunu: MLEADER.' % n_ml
     if all_num:
         summary += '\nSayısal sütunlar (toplamı var): ' + ', '.join(all_num)
     if gb:

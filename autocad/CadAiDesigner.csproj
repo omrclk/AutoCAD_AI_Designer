@@ -37,6 +37,7 @@
     <Compile Include="src\Takeoff.cs" />
     <Compile Include="src\AttExport.cs" />
     <Compile Include="src\AttImport.cs" />
+    <Compile Include="src\MlBilgi.cs" />
     <Compile Include="src\Armatur.cs" />
     <Compile Include="src\Aydinlatma.cs" />
     <Compile Include="src\OdaSayim.cs" />

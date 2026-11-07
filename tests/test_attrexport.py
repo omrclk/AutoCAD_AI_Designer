@@ -42,9 +42,27 @@ class TestAttrExport(unittest.TestCase):
 
     def test_rows_order_and_numbers(self):
         rows, num = attrexport._rows([B('e', '1', A='5', B='x')], ['A', 'B'])
-        self.assertEqual(rows[0], ['Blok', 'Katman', attrexport.HANDLE_COL, 'X', 'Y', 'A', 'B'])
-        self.assertEqual(rows[1][5], 5)
-        self.assertEqual(rows[-1][5], 5)
+        self.assertEqual(rows[0], ['Blok', 'Tip', 'Katman', attrexport.HANDLE_COL, 'X', 'Y', 'A', 'B'])
+        self.assertEqual(rows[1][1], 'BLOK')
+        self.assertEqual(rows[1][6], 5)
+        self.assertEqual(rows[-1][6], 5)
+
+    def test_mleader_type_column(self):
+        b = B('KABLO', 'AB', **{'TIP': 'N2XH', 'KESIT': '4x50 mm2'})
+        b['type'] = 'MLEADER'
+        plain = B('KABLO', 'AC', **{'TIP': 'NYY', 'KESIT': '3x2,5'})
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'a_attribute.xlsx')
+            attrexport.export({'blocks': [b, plain], 'tag_order': {'KABLO': ['TIP', 'KESIT']}, 'export_path': p})
+            sheets = __import__('attrimport').read_sheets(p)
+            tum = [rows for name, rows in sheets if name == 'Tümü'][0]
+            head = [c[1] for c in tum[0]]
+            self.assertEqual(head[1], 'Tip')
+            ti, tip = head.index('Tip'), head.index('TIP')
+            self.assertNotEqual(ti, tip)
+            self.assertEqual(tum[1][ti][1], 'MLEADER')
+            self.assertEqual(tum[1][tip][1], 'N2XH')
+            self.assertEqual(tum[2][ti][1], 'BLOK')
 
     def test_no_blocks(self):
         with self.assertRaises(ValueError):

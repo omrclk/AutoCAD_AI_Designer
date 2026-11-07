@@ -87,23 +87,46 @@ namespace CadAiDesigner
                 {
                     ObjectId id = ObjectId.Null;
                     try { long hv = Convert.ToInt64(g.Key, 16); db.TryGetObjectId(new Handle(hv), out id); } catch (System.Exception) { }
-                    BlockReference br = id.IsNull || id.IsErased ? null : tx.GetObject(id, OpenMode.ForRead) as BlockReference;
-                    if (br == null) { missing += g.Count(); continue; }
-                    LayerTableRecord ltr = (LayerTableRecord)tx.GetObject(br.LayerId, OpenMode.ForRead);
-                    if (ltr.IsLocked) { locked += g.Count(); if (lockedList.Count < 8) lockedList.Add(g.Key + " (" + br.Layer + ")"); continue; }
+                    Entity ent = id.IsNull || id.IsErased ? null : tx.GetObject(id, OpenMode.ForRead) as Entity;
+                    BlockReference br = ent as BlockReference;
+                    MLeader ml = ent as MLeader;
+                    if (br == null && (ml == null || !AttExport.IsBlockContent(ml))) { missing += g.Count(); continue; }
+                    LayerTableRecord ltr = (LayerTableRecord)tx.GetObject(ent.LayerId, OpenMode.ForRead);
+                    if (ltr.IsLocked) { locked += g.Count(); if (lockedList.Count < 8) lockedList.Add(g.Key + " (" + ent.Layer + ")"); continue; }
                     Dictionary<string, string> want = g.ToDictionary(c => J.Str(c, "tag").ToUpperInvariant(), c => J.Str(c, "new") ?? "");
-                    foreach (ObjectId aid in br.AttributeCollection)
+                    if (br != null)
                     {
-                        AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
-                        string v;
-                        if (ar == null || !want.TryGetValue(ar.Tag.ToUpperInvariant(), out v)) continue;
-                        bool lockedAttr = false; try { lockedAttr = ar.IsConstant; } catch (System.Exception) { }
-                        if (lockedAttr) continue;
-                        ar.UpgradeOpen();
-                        bool mt = false; try { mt = ar.IsMTextAttribute; } catch (System.Exception) { }
-                        if (mt) { try { MText m = ar.MTextAttribute; m.Contents = v; ar.MTextAttribute = m; ar.UpdateMTextAttribute(); } catch (System.Exception) { ar.TextString = v; } }
-                        else ar.TextString = v;
-                        want.Remove(ar.Tag.ToUpperInvariant()); done++; blocks.Add(g.Key);
+                        foreach (ObjectId aid in br.AttributeCollection)
+                        {
+                            AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
+                            string v;
+                            if (ar == null || !want.TryGetValue(ar.Tag.ToUpperInvariant(), out v)) continue;
+                            bool lockedAttr = false; try { lockedAttr = ar.IsConstant; } catch (System.Exception) { }
+                            if (lockedAttr) continue;
+                            ar.UpgradeOpen();
+                            AttExport.SetAttText(ar, v);
+                            want.Remove(ar.Tag.ToUpperInvariant()); done++; blocks.Add(g.Key);
+                        }
+                    }
+                    else
+                    {
+                        BlockTableRecord def = tx.GetObject(ml.BlockContentId, OpenMode.ForRead) as BlockTableRecord;
+                        Dictionary<string, AttributeDefinition> defs = new Dictionary<string, AttributeDefinition>();
+                        if (def != null)
+                            foreach (ObjectId did in def)
+                            {
+                                AttributeDefinition ad = tx.GetObject(did, OpenMode.ForRead) as AttributeDefinition;
+                                if (ad == null || ad.Constant) continue;
+                                string k = ad.Tag.ToUpperInvariant();
+                                if (!defs.ContainsKey(k)) defs[k] = ad;
+                            }
+                        foreach (string key in want.Keys.ToList())
+                        {
+                            AttributeDefinition ad;
+                            if (!defs.TryGetValue(key, out ad)) continue;
+                            AttExport.SetLeaderAttr(ml, ad, want[key]);
+                            want.Remove(key); done++; blocks.Add(g.Key);
+                        }
                     }
                     missing += want.Count;
                 }
