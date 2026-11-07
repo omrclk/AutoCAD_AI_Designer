@@ -14,7 +14,7 @@ namespace CadAiDesigner
     public class MlKopyaCommands
     {
         const double TolMm = 50;
-        static bool useCenter;
+        static bool useCenter = false; // Ekleme (insertion point). Merkez = geometric extents center.
 
         [CommandMethod("MLKOPYA", CommandFlags.Modal)]
         public void Run() { Do(); }
@@ -82,16 +82,15 @@ namespace CadAiDesigner
                     {
                         BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
                         if (br == null || br.OwnerId.IsNull) continue;
-                        Point3d target = useCenter ? OlcuCommands.Center(tx, br) : br.Position;
+                        Point3d target = TargetPoint(br, useCenter);
                         List<Point3d> tips = Arrows(tx, br.OwnerId, occupied);
                         if (Near(tips, target, tol)) { skipped++; continue; }
 
                         MLeader clone = null;
                         try
                         {
-                            clone = PlaceCopy(tx, db, sample, br.OwnerId, target - arrow);
+                            clone = PlaceCopy(tx, sample, br.OwnerId, target - arrow);
                             if (clone == null) { failed++; continue; }
-                            if (AttExport.IsBlockContent(sample)) { try { CopyAttrs(tx, sample, clone); } catch (System.Exception) { } }
                             tips.Add(target);
                             foreach (Point3d p in AllArrows(clone)) tips.Add(p);
                             made++;
@@ -124,13 +123,19 @@ namespace CadAiDesigner
             }
         }
 
-        /// <summary>Arrow tip: first vertex of the first leader line.</summary>
+        /// <summary>Arrow tip in WCS: GetFirstVertex of the first leader line. Not the landing (last vertex) and not the text/block position.</summary>
         static bool TryArrow(MLeader ml, out Point3d tip)
         {
             tip = Point3d.Origin;
-            List<Point3d> all = AllArrows(ml);
-            if (all.Count == 0) return false;
-            tip = all[0];
+            if (ml == null) return false;
+            ArrayList leaders = null;
+            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return false; }
+            if (leaders == null || leaders.Count == 0) return false;
+            ArrayList lines = null;
+            try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(leaders[0])); } catch (System.Exception) { return false; }
+            if (lines == null || lines.Count == 0) return false;
+            try { tip = ml.GetFirstVertex(Convert.ToInt32(lines[0])); }
+            catch (System.Exception) { return false; }
             return true;
         }
 
@@ -155,54 +160,32 @@ namespace CadAiDesigner
             return pts;
         }
 
-        /// <summary>Deep-clones the sample (MText, frame, landing, style, block attributes), then moves the whole leader so its arrow tip lands on the target. Falls back to Clone().</summary>
-        static MLeader PlaceCopy(Transaction tx, Database db, MLeader sample, ObjectId ownerId, Vector3d delta)
+        /// <summary>One database copy, then a single displacement. Nothing else moves vertices or the text.</summary>
+        static MLeader PlaceCopy(Transaction tx, MLeader sample, ObjectId ownerId, Vector3d delta)
         {
             BlockTableRecord space = tx.GetObject(ownerId, OpenMode.ForWrite) as BlockTableRecord;
             if (space == null) return null;
-            MLeader clone = null;
-            try
-            {
-                ObjectIdCollection ids = new ObjectIdCollection();
-                ids.Add(sample.ObjectId);
-                IdMapping map = new IdMapping();
-                db.DeepCloneObjects(ids, ownerId, map, false);
-                IdPair pair = map[sample.ObjectId];
-                if (pair.IsCloned && !pair.Value.IsNull)
-                    clone = tx.GetObject(pair.Value, OpenMode.ForWrite) as MLeader;
-            }
-            catch (System.Exception) { clone = null; }
-            if (clone == null)
-            {
-                clone = sample.Clone() as MLeader;
-                if (clone == null) return null;
-                space.AppendEntity(clone);
-                tx.AddNewlyCreatedDBObject(clone, true);
-            }
+            MLeader clone = sample.Clone() as MLeader;
+            if (clone == null) return null;
+            space.AppendEntity(clone);
+            tx.AddNewlyCreatedDBObject(clone, true);
             clone.TransformBy(Matrix3d.Displacement(delta));
             return clone;
         }
 
-        static void CopyAttrs(Transaction tx, MLeader src, MLeader dst)
+        /// <summary>Ekleme = insertion point. Merkez = WCS center of the block reference's geometric extents.</summary>
+        static Point3d TargetPoint(BlockReference br, bool center)
         {
-            LeaderInfo info = AttExport.ReadLeader(tx, src);
-            if (info == null || !AttExport.IsBlockContent(dst)) return;
-            BlockTableRecord def = tx.GetObject(dst.BlockContentId, OpenMode.ForRead) as BlockTableRecord;
-            if (def == null) return;
-            Dictionary<string, AttributeDefinition> byTag = new Dictionary<string, AttributeDefinition>(StringComparer.OrdinalIgnoreCase);
-            foreach (ObjectId id in def)
+            if (!center) return br.Position;
+            try
             {
-                AttributeDefinition ad = tx.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
-                if (ad == null || ad.Constant || byTag.ContainsKey(ad.Tag)) continue;
-                byTag[ad.Tag] = ad;
+                Extents3d ex = br.GeometricExtents;
+                return new Point3d(
+                    (ex.MinPoint.X + ex.MaxPoint.X) / 2.0,
+                    (ex.MinPoint.Y + ex.MaxPoint.Y) / 2.0,
+                    (ex.MinPoint.Z + ex.MaxPoint.Z) / 2.0);
             }
-            foreach (KeyValuePair<string, string> kv in info.Values)
-            {
-                if (info.Const.Contains(kv.Key)) continue;
-                AttributeDefinition ad;
-                if (!byTag.TryGetValue(kv.Key, out ad)) continue;
-                AttExport.SetLeaderAttr(dst, ad, kv.Value ?? "");
-            }
+            catch (System.Exception) { return br.Position; }
         }
 
         static List<Point3d> Arrows(Transaction tx, ObjectId spaceId, Dictionary<ObjectId, List<Point3d>> cache)
