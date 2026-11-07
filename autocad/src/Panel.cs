@@ -18,7 +18,7 @@ namespace CadAiDesigner
         readonly TextBox prompt = new TextBox();
         readonly Label status = new Label();
         readonly Button btnSelect = new Button(), btnAsk = new Button(), btnApply = new Button(),
-                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
+                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = 8000000, RecursionLimit = 40 };
         string session = Guid.NewGuid().ToString("N");
         bool busy, warnedSel;
@@ -68,6 +68,7 @@ namespace CadAiDesigner
             Setup(btnAtt, "Attribute Excel", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute Excel: komut satırındaki soruları yanıtlayın (seçim varsa seçili bloklar aktarılır)."); d.SendStringToExecute("AIDATTEXPORT ", true, false, false); } });
             Setup(btnAttImp, "Attribute İçe Aktar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute İçe Aktar: düzenlenmiş Excel dosyasını seçin; önizlemeden sonra komut satırında Evet/Hayır ile onaylayın (Handle sütununu değiştirmeyin)."); d.SendStringToExecute("AIDATTIMPORT ", true, false, false); } });
             Setup(btnMl, "Etiket Bilgisi", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Etiket Bilgisi: seçili multileader (blok içerik) veya attribute bloğu. Farklı değer *Çeşitli* görünür; Uygula yazılan değeri seçili tüm nesnelere yazar."); d.SendStringToExecute("MLBILGI ", true, false, false); } });
+            Setup(btnMlKop, "Bloklara etiket kopyala", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Bloklara etiket kopyala: örnek multileader'ı tıklayın, ok ucu Ekleme veya Merkez, sonra hedef blokları pencere ile seçin. Etiket, örneğin ok ucuna göre aynı uzaklıkta durur. Yakınında ok olan blok atlanır. Tek UNDO."); d.SendStringToExecute("MLKOPYA ", true, false, false); } });
             Setup(btnOSinir, "Oda sınırı çiz", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Oda sınırı: planı pencere ile seçin; OSAY ile aynı oda tespiti, kapalı polyline A_ODA_SINIR katmanında."); d.SendStringToExecute("AIDODASINIR ", true, false, false); } });
             Setup(btnOda, "Oda blok sayımı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Oda blok sayımı: kapalı oda polyline'ları (veya iç nokta), isteğe bağlı bina sınırı ve blokları seçin. Excel: satır=blok, sütun=oda, toplamlar; mükerrer tek, bina dışı sayılmaz."); d.SendStringToExecute("AIDODASAYIM ", true, false, false); } });
             Setup(btnAyd, "Aydınlatma hesabı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Aydınlatma hesabı: oda/koridor polyline'ını (veya iç nokta) ve armatürleri seçin; H, Φ, MF, yansımalar sorulur. Eort lümen yöntemi, Uo yaklaşık."); d.SendStringToExecute("AIDAYDHESAP ", true, false, false); } });
@@ -76,7 +77,7 @@ namespace CadAiDesigner
             btnApply.Enabled = false; btnCancel.Enabled = false;
 
             FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0) };
-            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnArm, btnAyd, btnOda, btnOSinir });
+            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir });
             Label tip = new Label
             {
                 Dock = DockStyle.Fill, AutoSize = false, Height = 48, AutoEllipsis = true, ForeColor = SystemColors.GrayText, Padding = new Padding(0, 6, 0, 0),
