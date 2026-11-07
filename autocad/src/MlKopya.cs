@@ -185,7 +185,7 @@ namespace CadAiDesigner
                     foreach (object lio in lines)
                     {
                         int line = Convert.ToInt32(lio);
-                        int n = ml.GetVertexCount(line);
+                        int n = ml.VerticesCount(line);
                         for (int i = 0; i < n; i++)
                         {
                             Point3d p = ml.GetVertex(line, i) + d;

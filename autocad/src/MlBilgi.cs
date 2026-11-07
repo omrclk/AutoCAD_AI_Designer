@@ -77,10 +77,10 @@ namespace CadAiDesigner
         {
             Dock = DockStyle.Fill;
             AutoScaleMode = AutoScaleMode.Dpi;
-            Font = new Font("Segoe UI", 9);
-            head.Dock = DockStyle.Fill; head.AutoSize = false; head.Height = 36; head.Font = new Font("Segoe UI", 9.5f, FontStyle.Bold); head.AutoEllipsis = true;
+            Font = new System.Drawing.Font("Segoe UI", 9);
+            head.Dock = DockStyle.Fill; head.AutoSize = false; head.Height = 36; head.Font = new System.Drawing.Font("Segoe UI", 9.5f, System.Drawing.FontStyle.Bold); head.AutoEllipsis = true;
             sub.Dock = DockStyle.Fill; sub.AutoSize = false; sub.Height = 22; sub.ForeColor = SystemColors.GrayText; sub.AutoEllipsis = true;
-            hint.Dock = DockStyle.Fill; hint.AutoSize = false; hint.Height = 48; hint.ForeColor = SystemColors.GrayText; hint.Font = new Font("Segoe UI", 8);
+            hint.Dock = DockStyle.Fill; hint.AutoSize = false; hint.Height = 48; hint.ForeColor = SystemColors.GrayText; hint.Font = new System.Drawing.Font("Segoe UI", 8);
             hint.Text = "Aynı blok çoklu seçimde farklı değer " + Various + " görünür. Değiştirilen değer seçili tüm nesnelere yazılır; olduğu gibi bırakılırsa korunur. Sabit attribute düzenlenemez.";
             status.Dock = DockStyle.Fill; status.AutoSize = false; status.Height = 36; status.AutoEllipsis = true;
             apply.Text = "Uygula"; apply.AutoSize = true; apply.Padding = new Padding(8, 2, 8, 2); apply.Enabled = false;
@@ -90,7 +90,7 @@ namespace CadAiDesigner
             grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false; grid.AllowUserToResizeRows = false;
             grid.RowHeadersVisible = false; grid.MultiSelect = false; grid.SelectionMode = DataGridViewSelectionMode.CellSelect;
             grid.EditMode = DataGridViewEditMode.EditOnEnter; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
-            grid.BackgroundColor = SystemColors.Window; grid.BorderStyle = BorderStyle.None; grid.Font = new Font("Segoe UI", 9);
+            grid.BackgroundColor = SystemColors.Window; grid.BorderStyle = BorderStyle.None; grid.Font = new System.Drawing.Font("Segoe UI", 9);
             grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
             grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "tag", HeaderText = "Etiket", ReadOnly = true, SortMode = DataGridViewColumnSortMode.NotSortable, FillWeight = 40 });
             grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "val", HeaderText = "Değer", SortMode = DataGridViewColumnSortMode.NotSortable, FillWeight = 60 });
@@ -103,7 +103,7 @@ namespace CadAiDesigner
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-            FlowLayoutPanel bar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = new Padding(0) };
+            FlowLayoutPanel bar = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight, WrapContents = false, Margin = new Padding(0) };
             bar.Controls.Add(apply);
             status.Margin = new Padding(8, 6, 0, 0);
             bar.Controls.Add(status);
