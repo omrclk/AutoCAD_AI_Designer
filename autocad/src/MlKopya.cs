@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
@@ -10,9 +11,10 @@ using Autodesk.AutoCAD.Runtime;
 namespace CadAiDesigner
 {
     /// <summary>MLKOPYA / AIDMLKOPYA: base-point copy of one multileader, the same way COPY clones it.
-    /// DeepCloneObjects then a single TransformBy. The leader, landing and text are not edited afterwards.</summary>
+    /// After the base point, blocks are window-selected; each copy is DeepCloneObjects plus one displacement.</summary>
     public class MlKopyaCommands
     {
+        const double TolMm = 50;
         [CommandMethod("MLKOPYA", CommandFlags.Modal)]
         public void Run() { Do(); }
 
@@ -38,20 +40,68 @@ namespace CadAiDesigner
                 if (br.Status != PromptStatus.OK) return;
                 Point3d basis = br.Value.TransformBy(ed.CurrentUserCoordinateSystem);
 
-                List<Point3d> places = new List<Point3d>();
-                while (true)
+                bool insertOnly = true;
+                Vector3d localOff = new Vector3d(0, 0, 0);
+                PromptEntityOptions ro = new PromptEntityOptions("\nÖrnek blokta karşılık gelen noktayı tıkla <Ekleme noktası>: ");
+                ro.SetRejectMessage("\nBlok seçin. ");
+                ro.AddAllowedClass(typeof(BlockReference), false);
+                ro.AllowNone = true;
+                PromptEntityResult rr = ed.GetEntity(ro);
+                if (rr.Status == PromptStatus.Cancel) return;
+                if (rr.Status == PromptStatus.OK)
                 {
-                    Point3d p;
-                    if (!NextPoint(ed, er.ObjectId, basis, out p)) break;
-                    places.Add(p);
+                    using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
+                    {
+                        BlockReference reference = tx.GetObject(rr.ObjectId, OpenMode.ForRead) as BlockReference;
+                        if (reference != null)
+                        {
+                            Point3d picked = rr.PickedPoint.TransformBy(ed.CurrentUserCoordinateSystem);
+                            try
+                            {
+                                localOff = (picked - reference.Position).TransformBy(reference.BlockTransform.Inverse());
+                                insertOnly = false;
+                            }
+                            catch (System.Exception) { insertOnly = true; }
+                        }
+                        tx.Commit();
+                    }
+                }
+
+                bool tekli = false;
+                PromptSelectionResult sr = null;
+                PromptSelectionOptions so = new PromptSelectionOptions { MessageForAdding = "\nEtiket kopyalanacak blokları seç [Tekli]: " };
+                so.Keywords.Add("Tekli");
+                so.KeywordInput += (s, e) => { tekli = true; throw new Autodesk.AutoCAD.Runtime.Exception(ErrorStatus.OK); };
+                try { sr = ed.GetSelection(so, new SelectionFilter(new[] { new TypedValue((int)DxfCode.Start, "INSERT") })); }
+                catch (Autodesk.AutoCAD.Runtime.Exception) { if (!tekli) throw; }
+
+                int made = 0, failed = 0, skipped = 0;
+                List<Point3d> places = new List<Point3d>();
+                if (tekli)
+                {
+                    while (true)
+                    {
+                        Point3d p;
+                        if (!NextPoint(ed, er.ObjectId, basis, out p)) break;
+                        places.Add(p);
+                    }
+                }
+                else
+                {
+                    if (sr == null || sr.Status != PromptStatus.OK || sr.Value == null || sr.Value.Count == 0)
+                    {
+                        ed.WriteMessage("\nKopya yok.\n");
+                        return;
+                    }
+                    double tol = Math.Max(1.0, TolMm * ArmaturCommands.MmPublic(db));
+                    skipped = CollectBlocks(db, sr.Value.GetObjectIds(), localOff, insertOnly, tol, places);
                 }
                 if (places.Count == 0)
                 {
-                    ed.WriteMessage("\nKopya yok.\n");
+                    ed.WriteMessage("\nKopyalanan etiket yok." + (skipped > 0 ? " Atlanan (50 mm içinde ok var): " + skipped + "." : "") + "\n");
                     return;
                 }
 
-                int made = 0, failed = 0;
                 using (doc.LockDocument())
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
@@ -82,8 +132,8 @@ namespace CadAiDesigner
                     if (made > 0) tx.Commit();
                 }
                 string msg = made == 0
-                    ? "Kopyalanan etiket yok." + (failed > 0 ? " Yazılamayan: " + failed + "." : "")
-                    : "Etiket kopyalandı: " + made + "." + (failed > 0 ? " Yazılamayan: " + failed + "." : "") + " Geri almak için U.";
+                    ? "Kopyalanan etiket yok." + (skipped > 0 ? " Atlanan (50 mm içinde ok var): " + skipped + "." : "") + (failed > 0 ? " Yazılamayan: " + failed + "." : "")
+                    : "Etiket kopyalandı: " + made + ". Atlanan (50 mm içinde ok var): " + skipped + "." + (failed > 0 ? " Yazılamayan: " + failed + "." : "") + " Geri almak için U.";
                 ed.WriteMessage("\n" + msg + "\n");
                 try { Metraj.Raise(msg); } catch (System.Exception) { }
             }
@@ -92,6 +142,73 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nEtiket kopyalama hatası: " + ex.Message + "\n");
                 try { Metraj.Raise("Etiket kopyalama hatası: " + ex.Message); } catch (System.Exception) { }
             }
+        }
+
+        static int CollectBlocks(Database db, ObjectId[] ids, Vector3d localOff, bool insertOnly, double tol, List<Point3d> places)
+        {
+            int skipped = 0;
+            Dictionary<ObjectId, List<Point3d>> tips = new Dictionary<ObjectId, List<Point3d>>();
+            using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
+            {
+                foreach (ObjectId id in ids)
+                {
+                    BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
+                    if (br == null) continue;
+                    Point3d t = br.Position;
+                    if (!insertOnly)
+                    {
+                        try { t = br.Position + localOff.TransformBy(br.BlockTransform); }
+                        catch (System.Exception) { t = br.Position; }
+                    }
+                    List<Point3d> arrows = ArrowTips(tx, br.OwnerId, tips);
+                    if (NearTip(arrows, t, tol)) { skipped++; continue; }
+                    arrows.Add(t);
+                    places.Add(t);
+                }
+                tx.Commit();
+            }
+            return skipped;
+        }
+
+        static List<Point3d> ArrowTips(Transaction tx, ObjectId spaceId, Dictionary<ObjectId, List<Point3d>> cache)
+        {
+            List<Point3d> list;
+            if (cache.TryGetValue(spaceId, out list)) return list;
+            list = new List<Point3d>();
+            BlockTableRecord btr = tx.GetObject(spaceId, OpenMode.ForRead) as BlockTableRecord;
+            if (btr != null)
+                foreach (ObjectId id in btr)
+                {
+                    if (id.ObjectClass.DxfName != "MULTILEADER") continue;
+                    MLeader ml = tx.GetObject(id, OpenMode.ForRead) as MLeader;
+                    if (ml == null) continue;
+                    ArrayList leaders = null;
+                    try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { continue; }
+                    if (leaders == null) continue;
+                    foreach (object lo in leaders)
+                    {
+                        ArrayList lines = null;
+                        try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(lo)); } catch (System.Exception) { continue; }
+                        if (lines == null) continue;
+                        foreach (object lio in lines)
+                        {
+                            try { list.Add(ml.GetFirstVertex(Convert.ToInt32(lio))); } catch (System.Exception) { }
+                        }
+                    }
+                }
+            cache[spaceId] = list;
+            return list;
+        }
+
+        static bool NearTip(List<Point3d> tips, Point3d p, double tol)
+        {
+            double tol2 = tol * tol;
+            foreach (Point3d t in tips)
+            {
+                double dx = t.X - p.X, dy = t.Y - p.Y;
+                if (dx * dx + dy * dy <= tol2) return true;
+            }
+            return false;
         }
 
         /// <summary>COPY's path: deep-clone into the same space, then one displacement. Nothing else is changed.</summary>
