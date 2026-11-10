@@ -1,21 +1,18 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
+using Autodesk.AutoCAD.GraphicsInterface;
 using Autodesk.AutoCAD.Runtime;
 
 namespace CadAiDesigner
 {
-    /// <summary>MLKOPYA / AIDMLKOPYA: clone any MLeader onto each selected insert.
-    /// The arrowhead (first vertex) lands on the block; MoveMLeader shifts the landing and the text with it.</summary>
+    /// <summary>MLKOPYA / AIDMLKOPYA: base-point copy of one multileader, the same way COPY clones it.
+    /// DeepCloneObjects then a single TransformBy. The leader, landing and text are not edited afterwards.</summary>
     public class MlKopyaCommands
     {
-        const double TolMm = 50;
-        static bool useCenter = false; // Ekleme (insertion point). Merkez = geometric extents center.
-
         [CommandMethod("MLKOPYA", CommandFlags.Modal)]
         public void Run() { Do(); }
 
@@ -36,38 +33,32 @@ namespace CadAiDesigner
                 PromptEntityResult er = ed.GetEntity(eo);
                 if (er.Status != PromptStatus.OK) return;
 
-                using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
+                PromptPointOptions bo = new PromptPointOptions("\nMultileader üzerinde baz noktasını tıkla: ");
+                PromptPointResult br = ed.GetPoint(bo);
+                if (br.Status != PromptStatus.OK) return;
+                Point3d basis = br.Value.TransformBy(ed.CurrentUserCoordinateSystem);
+
+                List<Point3d> places = new List<Point3d>();
+                while (true)
                 {
-                    MLeader ml = tx.GetObject(er.ObjectId, OpenMode.ForRead) as MLeader;
-                    Point3d tip;
-                    if (ml == null || !TryArrow(ml, out tip))
-                    {
-                        ed.WriteMessage("\nSeçilen multileader'ın ok ucu yok.\n");
-                        return;
-                    }
-                    tx.Commit();
+                    Point3d p;
+                    if (!NextPoint(ed, er.ObjectId, basis, out p)) break;
+                    places.Add(p);
+                }
+                if (places.Count == 0)
+                {
+                    ed.WriteMessage("\nKopya yok.\n");
+                    return;
                 }
 
-                string def = useCenter ? "Merkez" : "Ekleme";
-                PromptKeywordOptions ko = new PromptKeywordOptions("\nOk ucu [Ekleme/Merkez] <" + def + ">: ", "Ekleme Merkez") { AllowNone = true };
-                PromptResult kr = ed.GetKeywords(ko);
-                if (kr.Status != PromptStatus.OK && kr.Status != PromptStatus.None) return;
-                if (kr.Status == PromptStatus.OK) useCenter = string.Equals(kr.StringResult, "Merkez", StringComparison.OrdinalIgnoreCase);
-
-                PromptSelectionResult sr = ed.GetSelection(
-                    new PromptSelectionOptions { MessageForAdding = "\nEtiketlenecek blokları pencere ile seçin: " },
-                    new SelectionFilter(new[] { new TypedValue((int)DxfCode.Start, "INSERT") }));
-                if (sr.Status != PromptStatus.OK || sr.Value == null || sr.Value.Count == 0) return;
-
-                int made = 0, skipped = 0, failed = 0, warned = 0;
+                int made = 0, failed = 0;
                 using (doc.LockDocument())
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     MLeader sample = tx.GetObject(er.ObjectId, OpenMode.ForRead) as MLeader;
-                    Point3d arrow;
-                    if (sample == null || !TryArrow(sample, out arrow))
+                    if (sample == null)
                     {
-                        ed.WriteMessage("\nSeçilen multileader'ın ok ucu yok.\n");
+                        ed.WriteMessage("\nÖrnek multileader okunamadı.\n");
                         return;
                     }
                     LayerTableRecord lay = tx.GetObject(sample.LayerId, OpenMode.ForRead) as LayerTableRecord;
@@ -76,46 +67,23 @@ namespace CadAiDesigner
                         ed.WriteMessage("\nÖrnek etiketin katmanı kilitli (" + sample.Layer + ").\n");
                         return;
                     }
-                    double tol = Math.Max(1.0, TolMm * ArmaturCommands.MmPublic(db));
-                    double eps = Math.Max(1e-6, ArmaturCommands.MmPublic(db));
-                    Dictionary<ObjectId, List<Point3d>> occupied = new Dictionary<ObjectId, List<Point3d>>();
-                    foreach (ObjectId id in sr.Value.GetObjectIds())
+                    ObjectId spaceId = sample.OwnerId.IsNull ? db.CurrentSpaceId : sample.OwnerId;
+                    BlockTableRecord space = tx.GetObject(spaceId, OpenMode.ForWrite) as BlockTableRecord;
+                    if (space == null)
                     {
-                        BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
-                        if (br == null || br.OwnerId.IsNull) continue;
-                        Point3d target = TargetPoint(br, useCenter);
-                        List<Point3d> tips = Arrows(tx, br.OwnerId, occupied);
-                        if (Near(tips, target, tol)) { skipped++; continue; }
-
-                        MLeader clone = null;
-                        try
-                        {
-                            bool rigid;
-                            clone = PlaceCopy(tx, ed, sample, br.OwnerId, target - arrow, eps, out rigid);
-                            if (clone == null) { failed++; continue; }
-                            if (!rigid) warned++;
-                            tips.Add(target);
-                            foreach (Point3d p in AllArrows(clone)) tips.Add(p);
-                            made++;
-                        }
-                        catch (System.Exception)
-                        {
-                            try
-                            {
-                                if (clone == null) { }
-                                else if (clone.ObjectId.IsNull) clone.Dispose();
-                                else if (!clone.IsErased) clone.Erase();
-                            }
-                            catch (System.Exception) { }
-                            failed++;
-                        }
+                        ed.WriteMessage("\nHedef alan açılamadı.\n");
+                        return;
+                    }
+                    foreach (Point3d p in places)
+                    {
+                        if (PlaceOne(tx, db, sample, space, p - basis)) made++;
+                        else failed++;
                     }
                     if (made > 0) tx.Commit();
                 }
-                string skip = "Atlanan (50 mm içinde ok var): " + skipped;
                 string msg = made == 0
-                    ? "Kopyalanan etiket yok. " + skip + (failed > 0 ? ". Yazılamayan: " + failed : "") + "."
-                    : "Etiket kopyalandı: " + made + " blok. " + skip + (failed > 0 ? ". Yazılamayan: " + failed : "") + (warned > 0 ? ". Uyarı: " + warned + " kopyada yazı ok ile birlikte gitmedi." : "") + ". Geri almak için U.";
+                    ? "Kopyalanan etiket yok." + (failed > 0 ? " Yazılamayan: " + failed + "." : "")
+                    : "Etiket kopyalandı: " + made + "." + (failed > 0 ? " Yazılamayan: " + failed + "." : "") + " Geri almak için U.";
                 ed.WriteMessage("\n" + msg + "\n");
                 try { Metraj.Raise(msg); } catch (System.Exception) { }
             }
@@ -126,153 +94,115 @@ namespace CadAiDesigner
             }
         }
 
-        /// <summary>Arrow tip in WCS: GetFirstVertex of the first leader line. Not the landing (last vertex) and not the text/block position.</summary>
-        static bool TryArrow(MLeader ml, out Point3d tip)
+        /// <summary>COPY's path: deep-clone into the same space, then one displacement. Nothing else is changed.</summary>
+        static bool PlaceOne(Transaction tx, Database db, MLeader sample, BlockTableRecord space, Vector3d delta)
         {
-            tip = Point3d.Origin;
-            if (ml == null) return false;
-            ArrayList leaders = null;
-            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return false; }
-            if (leaders == null || leaders.Count == 0) return false;
-            ArrayList lines = null;
-            try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(leaders[0])); } catch (System.Exception) { return false; }
-            if (lines == null || lines.Count == 0) return false;
-            try { tip = ml.GetFirstVertex(Convert.ToInt32(lines[0])); }
-            catch (System.Exception) { return false; }
+            try
+            {
+                ObjectIdCollection ids = new ObjectIdCollection();
+                ids.Add(sample.ObjectId);
+                IdMapping map = new IdMapping();
+                db.DeepCloneObjects(ids, space.ObjectId, map, false);
+                if (!map.Contains(sample.ObjectId)) return false;
+                IdPair pair = map[sample.ObjectId];
+                if (!pair.IsCloned || pair.Value.IsNull) return false;
+                Entity clone = tx.GetObject(pair.Value, OpenMode.ForWrite) as Entity;
+                if (clone == null) return false;
+                clone.TransformBy(Matrix3d.Displacement(delta));
+                return true;
+            }
+            catch (System.Exception)
+            {
+                try
+                {
+                    Entity clone = sample.Clone() as Entity;
+                    if (clone == null) return false;
+                    clone.TransformBy(Matrix3d.Displacement(delta));
+                    space.AppendEntity(clone);
+                    tx.AddNewlyCreatedDBObject(clone, true);
+                    return true;
+                }
+                catch (System.Exception) { return false; }
+            }
+        }
+
+        static bool NextPoint(Editor ed, ObjectId sampleId, Point3d basis, out Point3d p)
+        {
+            p = Point3d.Origin;
+            Entity ghost = null;
+            try
+            {
+                using (Transaction tx = ed.Document.Database.TransactionManager.StartOpenCloseTransaction())
+                {
+                    MLeader sample = tx.GetObject(sampleId, OpenMode.ForRead) as MLeader;
+                    if (sample != null) ghost = sample.Clone() as Entity;
+                    tx.Commit();
+                }
+            }
+            catch (System.Exception) { ghost = null; }
+            if (ghost != null)
+            {
+                PreviewJig jig = new PreviewJig(ghost, basis);
+                try
+                {
+                    PromptResult dr = ed.Drag(jig);
+                    if (dr != null && dr.Status == PromptStatus.OK) { p = jig.Point; return true; }
+                    return false;
+                }
+                catch (System.Exception) { }
+                finally { try { ghost.Dispose(); } catch (System.Exception) { } }
+            }
+            PromptPointOptions o = new PromptPointOptions("\nBlokta yerleştirme noktasını tıkla [Bitir]: ");
+            o.AllowNone = true;
+            o.UseBasePoint = true;
+            o.BasePoint = basis;
+            o.Keywords.Add("Bitir");
+            PromptPointResult r = ed.GetPoint(o);
+            if (r.Status != PromptStatus.OK) return false;
+            p = r.Value.TransformBy(ed.CurrentUserCoordinateSystem);
             return true;
         }
 
-        static List<Point3d> AllArrows(MLeader ml)
+        /// <summary>Non-database clone following the cursor. AcquirePoint is WCS inside a jig.</summary>
+        class PreviewJig : DrawJig
         {
-            List<Point3d> pts = new List<Point3d>();
-            if (ml == null) return pts;
-            ArrayList leaders = null;
-            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return pts; }
-            if (leaders == null) return pts;
-            foreach (object lo in leaders)
+            readonly Entity _ghost;
+            readonly Point3d _base;
+            Point3d _last;
+            public Point3d Point;
+
+            public PreviewJig(Entity ghost, Point3d basePt)
             {
-                ArrayList lines = null;
-                try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(lo)); } catch (System.Exception) { continue; }
-                if (lines == null) continue;
-                foreach (object lio in lines)
-                {
-                    try { pts.Add(ml.GetFirstVertex(Convert.ToInt32(lio))); }
-                    catch (System.Exception) { }
-                }
+                _ghost = ghost;
+                _base = basePt;
+                _last = basePt;
+                Point = basePt;
             }
-            return pts;
-        }
 
-        /// <summary>Append the clone, then MoveMLeader once. No vertex, text-location, or dogleg edits after that: those were detaching the landing from the frame.</summary>
-        static MLeader PlaceCopy(Transaction tx, Editor ed, MLeader sample, ObjectId ownerId, Vector3d delta, double eps, out bool rigid)
-        {
-            rigid = false;
-            Point3d arrow0;
-            if (!TryArrow(sample, out arrow0)) return null;
-            Point3d text0;
-            bool hasText = TryText(sample, out text0);
-            BlockTableRecord space = tx.GetObject(ownerId, OpenMode.ForWrite) as BlockTableRecord;
-            if (space == null) return null;
-            MLeader clone = sample.Clone() as MLeader;
-            if (clone == null) return null;
-            space.AppendEntity(clone);
-            tx.AddNewlyCreatedDBObject(clone, true);
-            try { clone.MoveMLeader(delta, MoveType.MoveAllPoints); }
-            catch (System.Exception)
+            protected override SamplerStatus Sampler(JigPrompts prompts)
             {
-                try { if (!clone.IsErased) clone.Erase(); } catch (System.Exception) { }
-                return null;
+                JigPromptPointOptions opt = new JigPromptPointOptions("\nBlokta yerleştirme noktasını tıkla [Bitir]: ");
+                opt.BasePoint = _base;
+                opt.UseBasePoint = true;
+                opt.AppendKeywordsToMessage = false;
+                opt.UserInputControls = UserInputControls.Accept3dCoordinates | UserInputControls.NullResponseAccepted | UserInputControls.GovernedByOrthoMode;
+                opt.Keywords.Add("Bitir");
+                PromptPointResult r = prompts.AcquirePoint(opt);
+                if (r.Status == PromptStatus.Keyword || r.Status == PromptStatus.None || r.Status == PromptStatus.Cancel)
+                    return SamplerStatus.Cancel;
+                if (r.Status != PromptStatus.OK) return SamplerStatus.Cancel;
+                if (r.Value.DistanceTo(_last) < 1e-8) return SamplerStatus.NoChange;
+                try { _ghost.TransformBy(Matrix3d.Displacement(r.Value - _last)); }
+                catch (System.Exception) { return SamplerStatus.Cancel; }
+                _last = r.Value;
+                Point = r.Value;
+                return SamplerStatus.OK;
             }
-            EnsureMText(sample, clone);
-            bool tipOk, contentOk;
-            rigid = OffsetOk(clone, arrow0, text0, hasText, delta, eps, out tipOk, out contentOk);
-            if (!rigid)
+
+            protected override bool WorldDraw(WorldDraw draw)
             {
-                string w = "MLKOPYA uyarı: yazı oktan aynı vektörle gitmedi (ok " + (tipOk ? "tamam" : "kaydı") + ", yazı " + (hasText ? (contentOk ? "tamam" : "ayrıldı") : "yok") + ").";
-                try { AppLog.Write(w); } catch (System.Exception) { }
-                try { ed.WriteMessage("\n" + w); } catch (System.Exception) { }
+                return draw.Geometry.Draw(_ghost);
             }
-            return clone;
-        }
-
-        static void EnsureMText(MLeader sample, MLeader clone)
-        {
-            if (sample == null || clone == null || sample.ContentType != ContentType.MTextContent) return;
-            bool missing = true;
-            try { MText cur = clone.MText; missing = cur == null; } catch (System.Exception) { missing = true; }
-            if (!missing) return;
-            try
-            {
-                MText src = sample.MText;
-                if (src != null) clone.MText = (MText)src.Clone();
-            }
-            catch (System.Exception) { }
-        }
-
-        static bool TryText(MLeader ml, out Point3d p)
-        {
-            p = Point3d.Origin;
-            if (ml == null) return false;
-            try
-            {
-                if (ml.ContentType == ContentType.MTextContent) { p = ml.TextLocation; return true; }
-                if (ml.ContentType == ContentType.BlockContent) { p = ml.BlockPosition; return true; }
-                if (ml.ContentType == ContentType.ToleranceContent) { p = ml.ToleranceLocation; return true; }
-            }
-            catch (System.Exception) { }
-            return false;
-        }
-
-        static bool OffsetOk(MLeader ml, Point3d arrow0, Point3d text0, bool hasText, Vector3d d, double eps, out bool tipOk, out bool contentOk)
-        {
-            Point3d tip;
-            tipOk = TryArrow(ml, out tip) && tip.DistanceTo(arrow0 + d) <= eps;
-            contentOk = true;
-            if (!hasText) return tipOk;
-            Point3d text;
-            if (!TryText(ml, out text)) { contentOk = false; return false; }
-            contentOk = ((text - tip) - (text0 - arrow0)).Length <= eps;
-            return tipOk && contentOk;
-        }
-
-        /// <summary>Ekleme = insertion point. Merkez = WCS center of the block reference's geometric extents.</summary>
-        static Point3d TargetPoint(BlockReference br, bool center)
-        {
-            if (!center) return br.Position;
-            try
-            {
-                Extents3d ex = br.GeometricExtents;
-                return new Point3d(
-                    (ex.MinPoint.X + ex.MaxPoint.X) / 2.0,
-                    (ex.MinPoint.Y + ex.MaxPoint.Y) / 2.0,
-                    (ex.MinPoint.Z + ex.MaxPoint.Z) / 2.0);
-            }
-            catch (System.Exception) { return br.Position; }
-        }
-
-        static List<Point3d> Arrows(Transaction tx, ObjectId spaceId, Dictionary<ObjectId, List<Point3d>> cache)
-        {
-            List<Point3d> list;
-            if (cache.TryGetValue(spaceId, out list)) return list;
-            list = new List<Point3d>();
-            BlockTableRecord btr = tx.GetObject(spaceId, OpenMode.ForWrite) as BlockTableRecord;
-            if (btr != null)
-                foreach (ObjectId id in btr)
-                {
-                    if (id.ObjectClass.DxfName != "MULTILEADER") continue;
-                    MLeader ml = tx.GetObject(id, OpenMode.ForRead) as MLeader;
-                    if (ml == null) continue;
-                    list.AddRange(AllArrows(ml));
-                }
-            cache[spaceId] = list;
-            return list;
-        }
-
-        static bool Near(List<Point3d> tips, Point3d p, double tol)
-        {
-            foreach (Point3d t in tips)
-                if (new Point2d(t.X, t.Y).GetDistanceTo(new Point2d(p.X, p.Y)) <= tol) return true;
-            return false;
         }
     }
 }
