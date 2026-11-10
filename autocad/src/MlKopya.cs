@@ -9,8 +9,8 @@ using Autodesk.AutoCAD.Runtime;
 
 namespace CadAiDesigner
 {
-    /// <summary>MLKOPYA / AIDMLKOPYA: clone any MLeader (MText, block, or none) onto each selected insert.
-    /// The arrow tip lands on the block insertion point (or bbox center); TransformBy keeps the content offset.</summary>
+    /// <summary>MLKOPYA / AIDMLKOPYA: clone any MLeader onto each selected insert.
+    /// The arrow tip (first vertex) lands on the block point; vertices and text/block content are shifted by the same vector.</summary>
     public class MlKopyaCommands
     {
         const double TolMm = 50;
@@ -77,6 +77,8 @@ namespace CadAiDesigner
                         return;
                     }
                     double tol = Math.Max(1.0, TolMm * ArmaturCommands.MmPublic(db));
+                    double eps = Math.Max(1e-6, ArmaturCommands.MmPublic(db));
+                    int warned = 0;
                     Dictionary<ObjectId, List<Point3d>> occupied = new Dictionary<ObjectId, List<Point3d>>();
                     foreach (ObjectId id in sr.Value.GetObjectIds())
                     {
@@ -89,8 +91,10 @@ namespace CadAiDesigner
                         MLeader clone = null;
                         try
                         {
-                            clone = PlaceCopy(tx, sample, br.OwnerId, target - arrow);
+                            bool rigid;
+                            clone = PlaceCopy(tx, ed, sample, br.OwnerId, target - arrow, eps, out rigid);
                             if (clone == null) { failed++; continue; }
+                            if (!rigid) warned++;
                             tips.Add(target);
                             foreach (Point3d p in AllArrows(clone)) tips.Add(p);
                             made++;
@@ -112,7 +116,7 @@ namespace CadAiDesigner
                 string skip = "Atlanan (50 mm içinde ok var): " + skipped;
                 string msg = made == 0
                     ? "Kopyalanan etiket yok. " + skip + (failed > 0 ? ". Yazılamayan: " + failed : "") + "."
-                    : "Etiket kopyalandı: " + made + " blok. " + skip + (failed > 0 ? ". Yazılamayan: " + failed : "") + ". Geri almak için U.";
+                    : "Etiket kopyalandı: " + made + " blok. " + skip + (failed > 0 ? ". Yazılamayan: " + failed : "") + (warned > 0 ? ". Uyarı: " + warned + " kopyada yazı ok ile birlikte gitmedi." : "") + ". Geri almak için U.";
                 ed.WriteMessage("\n" + msg + "\n");
                 try { Metraj.Raise(msg); } catch (System.Exception) { }
             }
@@ -160,17 +164,190 @@ namespace CadAiDesigner
             return pts;
         }
 
-        /// <summary>One database copy, then a single displacement. Nothing else moves vertices or the text.</summary>
-        static MLeader PlaceCopy(Transaction tx, MLeader sample, ObjectId ownerId, Vector3d delta)
+        class Vert
         {
+            public int Line, Index, Count;
+            public Point3d P;
+        }
+
+        class Dog
+        {
+            public int Leader;
+            public Vector3d V;
+        }
+
+        /// <summary>Append first, then shift arrow, landing and content by the same vector. TransformBy is not used: on AutoCAD 2022 it moves the leader line and leaves MText behind.</summary>
+        static MLeader PlaceCopy(Transaction tx, Editor ed, MLeader sample, ObjectId ownerId, Vector3d delta, double eps, out bool rigid)
+        {
+            rigid = false;
             BlockTableRecord space = tx.GetObject(ownerId, OpenMode.ForWrite) as BlockTableRecord;
             if (space == null) return null;
             MLeader clone = sample.Clone() as MLeader;
             if (clone == null) return null;
             space.AppendEntity(clone);
             tx.AddNewlyCreatedDBObject(clone, true);
-            clone.TransformBy(Matrix3d.Displacement(delta));
+
+            Point3d arrow0;
+            if (!TryArrow(clone, out arrow0)) arrow0 = Point3d.Origin;
+            Point3d content0;
+            bool hasContent = TryContent(clone, out content0);
+            List<Vert> verts = Snapshot(clone);
+            List<Dog> dogs = SnapshotDogs(clone);
+
+            try { clone.MoveMLeader(delta, MoveType.MoveAllPoints); } catch (System.Exception) { }
+            ApplyVertices(clone, verts, delta);
+            ApplyContent(clone, content0, hasContent, delta);
+            RestoreDogs(clone, dogs);
+            if (!VerticesAt(clone, verts, delta, eps)) ApplyVertices(clone, verts, delta);
+            if (hasContent && !ContentAt(clone, content0, delta, eps)) ApplyContent(clone, content0, hasContent, delta);
+            if (!VerticesAt(clone, verts, delta, eps)) ApplyVertices(clone, verts, delta);
+            if (hasContent && !ContentAt(clone, content0, delta, eps)) ApplyContent(clone, content0, hasContent, delta);
+            RestoreDogs(clone, dogs);
+            try { clone.RecordGraphicsModified(true); } catch (System.Exception) { }
+
+            Point3d tip;
+            bool tipOk = TryArrow(clone, out tip) && tip.DistanceTo(arrow0 + delta) <= eps;
+            bool contentOk = true;
+            Point3d content1 = Point3d.Origin;
+            if (hasContent) contentOk = TryContent(clone, out content1) && content1.DistanceTo(content0 + delta) <= eps;
+            rigid = tipOk && contentOk;
+            if (!rigid)
+            {
+                string w = "MLKOPYA uyarı: kopya tam taşınmadı (ok " + (tipOk ? "tamam" : "yerinde kaldı") + ", içerik " + (hasContent ? (contentOk ? "tamam" : "yerinde kaldı") : "yok") + ").";
+                try { AppLog.Write(w); } catch (System.Exception) { }
+                try { ed.WriteMessage("\n" + w); } catch (System.Exception) { }
+            }
             return clone;
+        }
+
+        static List<Vert> Snapshot(MLeader ml)
+        {
+            List<Vert> verts = new List<Vert>();
+            ArrayList leaders = null;
+            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return verts; }
+            if (leaders == null) return verts;
+            foreach (object lo in leaders)
+            {
+                ArrayList lines = null;
+                try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(lo)); } catch (System.Exception) { continue; }
+                if (lines == null) continue;
+                foreach (object lio in lines)
+                {
+                    int line = Convert.ToInt32(lio);
+                    int n = 0;
+                    try { n = ml.VerticesCount(line); } catch (System.Exception) { continue; }
+                    for (int i = 0; i < n; i++)
+                    {
+                        try { verts.Add(new Vert { Line = line, Index = i, Count = n, P = ml.GetVertex(line, i) }); }
+                        catch (System.Exception) { }
+                    }
+                }
+            }
+            return verts;
+        }
+
+        static void ApplyVertices(MLeader ml, List<Vert> verts, Vector3d d)
+        {
+            foreach (Vert v in verts)
+            {
+                Point3d p = v.P + d;
+                try
+                {
+                    if (v.Count <= 1 || v.Index == 0) ml.SetFirstVertex(v.Line, p);
+                    else if (v.Index == v.Count - 1) ml.SetLastVertex(v.Line, p);
+                    else ml.SetVertex(v.Line, v.Index, p);
+                }
+                catch (System.Exception)
+                {
+                    try { ml.SetVertex(v.Line, v.Index, p); } catch (System.Exception) { }
+                }
+            }
+        }
+
+        static bool VerticesAt(MLeader ml, List<Vert> verts, Vector3d d, double eps)
+        {
+            foreach (Vert v in verts)
+            {
+                try
+                {
+                    if (ml.GetVertex(v.Line, v.Index).DistanceTo(v.P + d) > eps) return false;
+                }
+                catch (System.Exception) { return false; }
+            }
+            return true;
+        }
+
+        static bool TryContent(MLeader ml, out Point3d p)
+        {
+            p = Point3d.Origin;
+            if (ml == null) return false;
+            try
+            {
+                if (ml.ContentType == ContentType.MTextContent) { p = ml.TextLocation; return true; }
+                if (ml.ContentType == ContentType.BlockContent) { p = ml.BlockPosition; return true; }
+                if (ml.ContentType == ContentType.ToleranceContent) { p = ml.ToleranceLocation; return true; }
+            }
+            catch (System.Exception) { }
+            try
+            {
+                MText t = ml.MText;
+                if (t != null) { p = t.Location; return true; }
+            }
+            catch (System.Exception) { }
+            return false;
+        }
+
+        static void ApplyContent(MLeader ml, Point3d origin, bool has, Vector3d d)
+        {
+            if (!has) return;
+            Point3d dest = origin + d;
+            try
+            {
+                if (ml.ContentType == ContentType.MTextContent)
+                {
+                    MText t = ml.MText;
+                    if (t != null)
+                    {
+                        t.Location = dest;
+                        ml.MText = t;
+                    }
+                    ml.TextLocation = dest;
+                }
+                else if (ml.ContentType == ContentType.BlockContent)
+                    ml.BlockPosition = dest;
+                else if (ml.ContentType == ContentType.ToleranceContent)
+                    ml.ToleranceLocation = dest;
+            }
+            catch (System.Exception) { }
+        }
+
+        static bool ContentAt(MLeader ml, Point3d origin, Vector3d d, double eps)
+        {
+            Point3d p;
+            return TryContent(ml, out p) && p.DistanceTo(origin + d) <= eps;
+        }
+
+        static List<Dog> SnapshotDogs(MLeader ml)
+        {
+            List<Dog> dogs = new List<Dog>();
+            ArrayList leaders = null;
+            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return dogs; }
+            if (leaders == null) return dogs;
+            foreach (object lo in leaders)
+            {
+                int leader = Convert.ToInt32(lo);
+                try { dogs.Add(new Dog { Leader = leader, V = ml.GetDogleg(leader) }); }
+                catch (System.Exception) { }
+            }
+            return dogs;
+        }
+
+        static void RestoreDogs(MLeader ml, List<Dog> dogs)
+        {
+            foreach (Dog dog in dogs)
+            {
+                try { ml.SetDogleg(dog.Leader, dog.V); } catch (System.Exception) { }
+            }
         }
 
         /// <summary>Ekleme = insertion point. Merkez = WCS center of the block reference's geometric extents.</summary>
