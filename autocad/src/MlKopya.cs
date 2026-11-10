@@ -59,7 +59,7 @@ namespace CadAiDesigner
                     new SelectionFilter(new[] { new TypedValue((int)DxfCode.Start, "INSERT") }));
                 if (sr.Status != PromptStatus.OK || sr.Value == null || sr.Value.Count == 0) return;
 
-                int made = 0, skipped = 0, failed = 0;
+                int made = 0, skipped = 0, failed = 0, warned = 0;
                 using (doc.LockDocument())
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
@@ -78,7 +78,6 @@ namespace CadAiDesigner
                     }
                     double tol = Math.Max(1.0, TolMm * ArmaturCommands.MmPublic(db));
                     double eps = Math.Max(1e-6, ArmaturCommands.MmPublic(db));
-                    int warned = 0;
                     Dictionary<ObjectId, List<Point3d>> occupied = new Dictionary<ObjectId, List<Point3d>>();
                     foreach (ObjectId id in sr.Value.GetObjectIds())
                     {
