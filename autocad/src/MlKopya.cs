@@ -169,16 +169,42 @@ namespace CadAiDesigner
             public Point3d P;
         }
 
+        class Tail
+        {
+            public int Line;
+            public Point3d P;
+        }
+
         class Dog
         {
             public int Leader;
             public Vector3d V;
+            public double Length;
+            public bool HasLength;
         }
 
-        /// <summary>Append first, then shift arrow, landing and content by the same vector. TransformBy is not used: on AutoCAD 2022 it moves the leader line and leaves MText behind.</summary>
+        class Landing
+        {
+            public bool HasGlobals;
+            public bool EnableDogleg, EnableLanding;
+            public double DoglegLength, LandingGap;
+            public bool HasAttach;
+            public TextAttachmentType Left, Right, Top, Bottom;
+            public readonly List<Dog> Dogs = new List<Dog>();
+        }
+
+        /// <summary>Read the sample, append the clone, move every vertex (including the landing), then set the text location last so the frame stays at the landing instead of snapping onto the arrow.</summary>
         static MLeader PlaceCopy(Transaction tx, Editor ed, MLeader sample, ObjectId ownerId, Vector3d delta, double eps, out bool rigid)
         {
             rigid = false;
+            Point3d arrow0;
+            if (!TryArrow(sample, out arrow0)) return null;
+            Point3d text0;
+            bool hasText = TryText(sample, out text0);
+            List<Vert> verts = Snapshot(sample);
+            List<Tail> tails = SnapshotTails(sample);
+            Landing land = SnapshotLanding(sample);
+
             BlockTableRecord space = tx.GetObject(ownerId, OpenMode.ForWrite) as BlockTableRecord;
             if (space == null) return null;
             MLeader clone = sample.Clone() as MLeader;
@@ -186,37 +212,29 @@ namespace CadAiDesigner
             space.AppendEntity(clone);
             tx.AddNewlyCreatedDBObject(clone, true);
 
-            Point3d arrow0;
-            if (!TryArrow(clone, out arrow0)) arrow0 = Point3d.Origin;
-            Point3d content0;
-            bool hasContent = TryContent(clone, out content0);
-            List<Vert> verts = Snapshot(clone);
-            List<Dog> dogs = SnapshotDogs(clone);
-
-            try { clone.MoveMLeader(delta, MoveType.MoveAllPoints); } catch (System.Exception) { }
-            ApplyVertices(clone, verts, delta);
-            ApplyContent(clone, content0, hasContent, delta);
-            RestoreDogs(clone, dogs);
-            if (!VerticesAt(clone, verts, delta, eps)) ApplyVertices(clone, verts, delta);
-            if (hasContent && !ContentAt(clone, content0, delta, eps)) ApplyContent(clone, content0, hasContent, delta);
-            if (!VerticesAt(clone, verts, delta, eps)) ApplyVertices(clone, verts, delta);
-            if (hasContent && !ContentAt(clone, content0, delta, eps)) ApplyContent(clone, content0, hasContent, delta);
-            RestoreDogs(clone, dogs);
+            PlaceRigid(clone, verts, tails, land, text0, hasText, delta);
+            if (!OffsetOk(clone, arrow0, text0, hasText, delta, eps))
+                PlaceRigid(clone, verts, tails, land, text0, hasText, delta);
             try { clone.RecordGraphicsModified(true); } catch (System.Exception) { }
 
-            Point3d tip;
-            bool tipOk = TryArrow(clone, out tip) && tip.DistanceTo(arrow0 + delta) <= eps;
-            bool contentOk = true;
-            Point3d content1 = Point3d.Origin;
-            if (hasContent) contentOk = TryContent(clone, out content1) && content1.DistanceTo(content0 + delta) <= eps;
-            rigid = tipOk && contentOk;
+            bool tipOk, contentOk;
+            rigid = OffsetOk(clone, arrow0, text0, hasText, delta, eps, out tipOk, out contentOk);
             if (!rigid)
             {
-                string w = "MLKOPYA uyarı: kopya tam taşınmadı (ok " + (tipOk ? "tamam" : "yerinde kaldı") + ", içerik " + (hasContent ? (contentOk ? "tamam" : "yerinde kaldı") : "yok") + ").";
+                string w = "MLKOPYA uyarı: yazı oktan aynı vektörle gitmedi (ok " + (tipOk ? "tamam" : "kaydı") + ", yazı " + (hasText ? (contentOk ? "tamam" : "ok ucuna yapıştı") : "yok") + ").";
                 try { AppLog.Write(w); } catch (System.Exception) { }
                 try { ed.WriteMessage("\n" + w); } catch (System.Exception) { }
             }
             return clone;
+        }
+
+        /// <summary>Vertices first (arrow and landing), landing settings next, text location last.</summary>
+        static void PlaceRigid(MLeader ml, List<Vert> verts, List<Tail> tails, Landing land, Point3d text0, bool hasText, Vector3d d)
+        {
+            ApplyVertices(ml, verts, d);
+            ApplyTails(ml, tails, d);
+            RestoreLanding(ml, land);
+            ApplyText(ml, text0, hasText, d);
         }
 
         static List<Vert> Snapshot(MLeader ml)
@@ -263,20 +281,37 @@ namespace CadAiDesigner
             }
         }
 
-        static bool VerticesAt(MLeader ml, List<Vert> verts, Vector3d d, double eps)
+        static List<Tail> SnapshotTails(MLeader ml)
         {
-            foreach (Vert v in verts)
+            List<Tail> tails = new List<Tail>();
+            ArrayList leaders = null;
+            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return tails; }
+            if (leaders == null) return tails;
+            foreach (object lo in leaders)
             {
-                try
+                ArrayList lines = null;
+                try { lines = ml.GetLeaderLineIndexes(Convert.ToInt32(lo)); } catch (System.Exception) { continue; }
+                if (lines == null) continue;
+                foreach (object lio in lines)
                 {
-                    if (ml.GetVertex(v.Line, v.Index).DistanceTo(v.P + d) > eps) return false;
+                    int line = Convert.ToInt32(lio);
+                    try { tails.Add(new Tail { Line = line, P = ml.GetLastVertex(line) }); }
+                    catch (System.Exception) { }
                 }
-                catch (System.Exception) { return false; }
             }
-            return true;
+            return tails;
         }
 
-        static bool TryContent(MLeader ml, out Point3d p)
+        static void ApplyTails(MLeader ml, List<Tail> tails, Vector3d d)
+        {
+            foreach (Tail t in tails)
+            {
+                try { ml.SetLastVertex(t.Line, t.P + d); } catch (System.Exception) { }
+            }
+        }
+
+        /// <summary>Content position of the database leader. MText.Location is not used: the getter returns a copy whose location is not the frame.</summary>
+        static bool TryText(MLeader ml, out Point3d p)
         {
             p = Point3d.Origin;
             if (ml == null) return false;
@@ -287,65 +322,98 @@ namespace CadAiDesigner
                 if (ml.ContentType == ContentType.ToleranceContent) { p = ml.ToleranceLocation; return true; }
             }
             catch (System.Exception) { }
-            try
-            {
-                MText t = ml.MText;
-                if (t != null) { p = t.Location; return true; }
-            }
-            catch (System.Exception) { }
             return false;
         }
 
-        static void ApplyContent(MLeader ml, Point3d origin, bool has, Vector3d d)
+        static void ApplyText(MLeader ml, Point3d origin, bool has, Vector3d d)
         {
             if (!has) return;
             Point3d dest = origin + d;
             try
             {
-                if (ml.ContentType == ContentType.MTextContent)
-                {
-                    MText t = ml.MText;
-                    if (t != null)
-                    {
-                        t.Location = dest;
-                        ml.MText = t;
-                    }
-                    ml.TextLocation = dest;
-                }
-                else if (ml.ContentType == ContentType.BlockContent)
-                    ml.BlockPosition = dest;
-                else if (ml.ContentType == ContentType.ToleranceContent)
-                    ml.ToleranceLocation = dest;
+                if (ml.ContentType == ContentType.MTextContent) ml.TextLocation = dest;
+                else if (ml.ContentType == ContentType.BlockContent) ml.BlockPosition = dest;
+                else if (ml.ContentType == ContentType.ToleranceContent) ml.ToleranceLocation = dest;
             }
             catch (System.Exception) { }
         }
 
-        static bool ContentAt(MLeader ml, Point3d origin, Vector3d d, double eps)
+        static bool OffsetOk(MLeader ml, Point3d arrow0, Point3d text0, bool hasText, Vector3d d, double eps, out bool tipOk, out bool contentOk)
         {
-            Point3d p;
-            return TryContent(ml, out p) && p.DistanceTo(origin + d) <= eps;
+            Point3d tip;
+            tipOk = TryArrow(ml, out tip) && tip.DistanceTo(arrow0 + d) <= eps;
+            contentOk = true;
+            if (!hasText) return tipOk;
+            Point3d text;
+            if (!TryText(ml, out text)) { contentOk = false; return false; }
+            Vector3d want = text0 - arrow0;
+            Vector3d got = text - tip;
+            contentOk = (got - want).Length <= eps;
+            return tipOk && contentOk;
         }
 
-        static List<Dog> SnapshotDogs(MLeader ml)
+        static bool OffsetOk(MLeader ml, Point3d arrow0, Point3d text0, bool hasText, Vector3d d, double eps)
         {
-            List<Dog> dogs = new List<Dog>();
-            ArrayList leaders = null;
-            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { return dogs; }
-            if (leaders == null) return dogs;
-            foreach (object lo in leaders)
+            bool tipOk, contentOk;
+            return OffsetOk(ml, arrow0, text0, hasText, d, eps, out tipOk, out contentOk);
+        }
+
+        static Landing SnapshotLanding(MLeader ml)
+        {
+            Landing land = new Landing();
+            try
             {
-                int leader = Convert.ToInt32(lo);
-                try { dogs.Add(new Dog { Leader = leader, V = ml.GetDogleg(leader) }); }
-                catch (System.Exception) { }
+                land.EnableDogleg = ml.EnableDogleg;
+                land.EnableLanding = ml.EnableLanding;
+                land.DoglegLength = ml.DoglegLength;
+                land.LandingGap = ml.LandingGap;
+                land.HasGlobals = true;
             }
-            return dogs;
+            catch (System.Exception) { }
+            try
+            {
+                land.Left = ml.GetTextAttachmentType(LeaderDirectionType.LeftLeader);
+                land.Right = ml.GetTextAttachmentType(LeaderDirectionType.RightLeader);
+                land.Top = ml.GetTextAttachmentType(LeaderDirectionType.TopLeader);
+                land.Bottom = ml.GetTextAttachmentType(LeaderDirectionType.BottomLeader);
+                land.HasAttach = true;
+            }
+            catch (System.Exception) { }
+            ArrayList leaders = null;
+            try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { leaders = null; }
+            if (leaders != null)
+                foreach (object lo in leaders)
+                {
+                    int leader = Convert.ToInt32(lo);
+                    Dog dog = new Dog { Leader = leader };
+                    try { dog.V = ml.GetDogleg(leader); } catch (System.Exception) { continue; }
+                    try { dog.Length = ml.GetDoglegLength(leader); dog.HasLength = true; } catch (System.Exception) { }
+                    land.Dogs.Add(dog);
+                }
+            return land;
         }
 
-        static void RestoreDogs(MLeader ml, List<Dog> dogs)
+        static void RestoreLanding(MLeader ml, Landing land)
         {
-            foreach (Dog dog in dogs)
+            if (land == null) return;
+            if (land.HasGlobals)
+            {
+                try { ml.EnableDogleg = land.EnableDogleg; } catch (System.Exception) { }
+                try { ml.EnableLanding = land.EnableLanding; } catch (System.Exception) { }
+                try { ml.LandingGap = land.LandingGap; } catch (System.Exception) { }
+                try { ml.DoglegLength = land.DoglegLength; } catch (System.Exception) { }
+            }
+            foreach (Dog dog in land.Dogs)
             {
                 try { ml.SetDogleg(dog.Leader, dog.V); } catch (System.Exception) { }
+                if (dog.HasLength) { try { ml.SetDoglegLength(dog.Leader, dog.Length); } catch (System.Exception) { } }
+            }
+            if (land.HasAttach)
+            {
+                try { ml.SetTextAttachmentType(land.Left, LeaderDirectionType.LeftLeader); } catch (System.Exception) { }
+                try { ml.SetTextAttachmentType(land.Right, LeaderDirectionType.RightLeader); } catch (System.Exception) { }
+                try { ml.SetTextAttachmentType(land.Top, LeaderDirectionType.TopLeader); } catch (System.Exception) { }
+                try { ml.SetTextAttachmentType(land.Bottom, LeaderDirectionType.BottomLeader); } catch (System.Exception) { }
             }
         }
 
