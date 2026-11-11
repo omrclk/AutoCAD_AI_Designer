@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -24,6 +24,7 @@ using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 [assembly: CommandClass(typeof(CadAiDesigner.HatchDiagCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.RefCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.OlcuCommands))]
+[assembly: CommandClass(typeof(CadAiDesigner.TextExcelCommands))]
 [assembly: ExtensionApplication(typeof(CadAiDesigner.PluginApp))]
 [assembly: AssemblyTitle("AutoCAD AI Designer")]
 [assembly: AssemblyVersion("4.0.0.0")]
