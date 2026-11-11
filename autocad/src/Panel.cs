@@ -18,7 +18,7 @@ namespace CadAiDesigner
         readonly TextBox prompt = new TextBox();
         readonly Label status = new Label();
         readonly Button btnSelect = new Button(), btnAsk = new Button(), btnApply = new Button(),
-                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
+                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button(), btnKonsol = new Button();
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = 8000000, RecursionLimit = 40 };
         string session = Guid.NewGuid().ToString("N");
         bool busy, warnedSel;
@@ -62,6 +62,7 @@ namespace CadAiDesigner
             Setup(btnSettings, "Ayarlar", (s, e) => OpenSettings());
             Setup(btnFit, "Ek parçalar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Ek parçalar: tavaları seçin veya Enter (tümü), sonra komut satırında onaylayın."); d.SendStringToExecute("AIDBAGLANTI ", true, false, false); } });
             Setup(btnTava, "Tava Yerleştir", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Tava Yerleştir: plan çizgilerini seçin veya Tumu, sonra komut satırında seçenekleri onaylayın (Enter = Devam)."); d.SendStringToExecute("AIDTAVA ", true, false, false); } });
+            Setup(btnKonsol, "Konsol", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Konsol: örnek konsol bloğunu seçin, kablo tavalarını pencere ile seçin. Aralık 150, uç/dal payı 30 (hatırlanır, Enter = devam). Üst üste binen hatta tek konsol ve KAT=2. Dal ve serbest uçta pay bırakılır. Tek UNDO."); d.SendStringToExecute("KONSOL ", true, false, false); } });
             Setup(btnPk, "Plandan Keşif", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Plandan keşif: plan çizgilerini seçin veya Tumu, sonra Enter (çizim değişmez)."); d.SendStringToExecute("AIDPLANKESIF ", true, false, false); } });
             Setup(btnRef, "Referans noktaları", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Referans noktaları: önce kaynak plandan bir nokta, sonra hedef plandaki AYNI noktayı fareyle (osnap) seçin. İkinci çift dönme/ölçek için isteğe bağlıdır."); d.SendStringToExecute("AIDREFNOKTA ", true, false, false); } });
             Setup(btnOlcu, "Blok ölçüsü", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Blok ölçüsü: blokları seçin (pencere), Enter; sonra ölçü çizgisinin tarafını tıklayın (Enter = varsayılan). Ardışık ölçüler blok merkezlerinden yapılır."); d.SendStringToExecute("AIDOLCU ", true, false, false); } });
@@ -77,7 +78,7 @@ namespace CadAiDesigner
             btnApply.Enabled = false; btnCancel.Enabled = false;
 
             FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0) };
-            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir });
+            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnKonsol, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir });
             Label tip = new Label
             {
                 Dock = DockStyle.Fill, AutoSize = false, Height = 48, AutoEllipsis = true, ForeColor = SystemColors.GrayText, Padding = new Padding(0, 6, 0, 0),

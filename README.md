@@ -201,3 +201,14 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+## Konsol (KONSOL / AIDKONSOL)
+
+Panel: **Konsol**. Kablo tavası (`cabletray`) boyunca `konsol` bloğu dizer. Aralık ve paylar hatırlanır (`%LOCALAPPDATA%\CadAiDesigner\konsol.json`). Çizim birimi bu işte cm'dir.
+
+1. Örnek konsol bloğunu seçin. Katman, ölçek, Dist1 dışındaki dinamik özellikler ve attribute'lar (TIJLENGHT vb.) bu bloktan kopyalanır; KAT, üst üste binen tava sayısı olarak yazılır.
+2. Kablo tavalarını pencere ile seçin. Seçimdeki ve yakındaki `fittings` blokları dal kontrolüne girer.
+3. Aralık (varsayılan 150), uç/dal payı (30), EN payı (7,5) ve yan yana boşluk (10, kenardan kenara). Enter = devam.
+4. Üst üste binen aynı hat tek konsoldur (KAT, kat sayısı). Kenar boşluğu 10 ve daha az olan yan yana paralel tavalar, boylarının çakıştığı yerde tek konsol paylaşır: Dist1 dış kenardan dış kenara + EN payı, listedeki yeterince uzun ilk değer (liste yetmezse en büyük değer). KAT, grupta ikinci kat varsa `2`, yoksa `1`. Çakışmayan uçlar kendi konsolunu alır.
+5. Ana hat baştan sabit aralıkla yürür (ilk konsol uç payı kadar içeride, sonra seçilen aralık, varsayılan 150). Aralık her dalda yeniden bölünmez. Planlanan konsol T'nin üzerine (dal genişliğinin pay kadar yakınına) denk gelirse, yürüyüş yönünde dalın yakın kenarından pay kadar geriye alınır ve sonraki konsol bu yeni yerden bir aralık sonra konur. Dal kolunun ilk konsolu, ana hattan pay kadar ileridedir; serbest uçta son konsol yine pay kadar içeridedir. Bu son ile bir öncekinin arası paydan kısaysa (varsayılan 30) önceki atılır, uçtaki korunur.
+6. Yaklaşık 5 birim içinde konsol varsa o nokta atlanır; komut yeniden çalıştırılabilir. Tümü tek UNDO adımıdır.
