@@ -208,7 +208,7 @@ Panel: **Konsol**. Kablo tavası (`cabletray`) boyunca `konsol` bloğu dizer. Ar
 
 1. Örnek konsol bloğunu seçin. Katman, ölçek, Dist1 dışındaki dinamik özellikler ve attribute'lar (TIJLENGHT vb.) bu bloktan kopyalanır; KAT, üst üste binen tava sayısı olarak yazılır.
 2. Kablo tavalarını pencere ile seçin. Seçimdeki ve yakındaki `fittings` blokları dal kontrolüne girer.
-3. Aralık (varsayılan 150), uç/dal payı (30) ve EN payı (7,5). Enter = devam.
-4. Aynı doğru üzerinde üst üste binen tavalar tek hattır: o kısımda bir konsol, KAT=`2` (tek katta `1`). Dist1 = EN + pay, bloğun listesine yuvarlanır (17,5 … 107,5). Konsol tavaya dik durur ve eksene ortalanır.
-5. Serbest uç ve dirsekte ilk/son konsol uçtan pay kadar içeridedir. Dalın (T veya tee/haç fittings) içine konsol konmaz; dal gövdesinin kenarından en az pay kadar önce durulur. Aralık en fazla seçilen değeri aşmayacak şekilde, izinli aralığın iki ucu dahil eşit dağıtılır.
+3. Aralık (varsayılan 150), uç/dal payı (30), EN payı (7,5) ve yan yana boşluk (10, kenardan kenara). Enter = devam.
+4. Üst üste binen aynı hat tek konsoldur (KAT, kat sayısı). Kenar boşluğu 10 ve daha az olan yan yana paralel tavalar, boylarının çakıştığı yerde tek konsol paylaşır: Dist1 dış kenardan dış kenara + EN payı, listedeki yeterince uzun ilk değer (liste yetmezse en büyük değer). KAT, grupta ikinci kat varsa `2`, yoksa `1`. Çakışmayan uçlar kendi konsolunu alır.
+5. Serbest uç ve çakışan boyun uçları pay kadar içeridedir. Dal, gruptaki herhangi bir tavanın dalı olsa da bütün kesitte pay kadar boşluk bırakır. Aralık, izinli aralığın iki ucu dahil, seçilen değeri aşmayacak şekilde eşit dağıtılır.
 6. Yaklaşık 5 birim içinde konsol varsa o nokta atlanır; komut yeniden çalıştırılabilir. Tümü tek UNDO adımıdır.

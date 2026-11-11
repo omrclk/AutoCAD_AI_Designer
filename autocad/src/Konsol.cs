@@ -20,6 +20,8 @@ namespace CadAiDesigner
         public double pay { get; set; } = 30;
         public double ek { get; set; } = 7.5;
         public double atla { get; set; } = 5;
+        /// <summary>Edge-to-edge gap (cm) at or under which parallel trays share one konsol.</summary>
+        public double yan { get; set; } = 10;
 
         static string FilePath { get { return Path.Combine(AppPaths.Dir, "konsol.json"); } }
 
@@ -36,6 +38,7 @@ namespace CadAiDesigner
                         if (s.pay < 0) s.pay = 30;
                         if (s.ek < 0) s.ek = 7.5;
                         if (s.atla < 0) s.atla = 5;
+                        if (s.yan < 0) s.yan = 10;
                         return s;
                     }
                 }
@@ -86,8 +89,17 @@ namespace CadAiDesigner
 
         internal class St
         {
-            public double X, Y, Z, En;
+            public double X, Y, Z, En, Ang;
             public int Kat;
+            /// <summary>Side-by-side span: Dist1 ceilings to the next allowed value (never shorter than the outer width).</summary>
+            public bool Span;
+        }
+
+        class Lane
+        {
+            public Run Run;
+            public double Lat, T0, Scale, HalfMax;
+            public List<double[]> Sel = new List<double[]>();
         }
 
         public static void SetDir(Seg s)
@@ -287,18 +299,22 @@ namespace CadAiDesigner
         }
 
         /// <summary>Both ends of each allowed interval, then evenly filled so the step is at most <paramref name="spacing"/>.</summary>
-        public static List<St> Stations(Run run, double spacing, double pay, double minSep)
+        public static List<St> Stations(Run run, double spacing, double pay, double minSep, List<double[]> blocked)
         {
             List<St> res = new List<St>();
             List<double[]> body = MergeSelected(run);
             if (body.Count == 0 || run.L < 1) return res;
             if (pay < 0) pay = 0;
             if (spacing < 1) spacing = run.L;
+            double ang = Math.Atan2(run.Dy, run.Dx);
             double outerA = body[0][0], outerB = body[body.Count - 1][1];
             List<double[]> pieces = body;
             pieces = Subtract(pieces, outerA, outerA + pay);
             pieces = Subtract(pieces, outerB - pay, outerB);
             foreach (double[] z in run.Zones) pieces = Subtract(pieces, z[0], z[1]);
+            if (blocked != null)
+                foreach (double[] blk in blocked)
+                    if (blk != null && blk.Length >= 2) pieces = Subtract(pieces, blk[0], blk[1]);
             foreach (double[] p in pieces)
             {
                 foreach (double t in Fill(p[0], p[1], spacing, minSep))
@@ -311,11 +327,293 @@ namespace CadAiDesigner
                         Y = run.Oy + run.Dy * t,
                         Z = run.Z,
                         En = en,
-                        Kat = kat
+                        Kat = kat,
+                        Ang = ang
                     });
                 }
             }
             return res;
+        }
+
+        /// <summary>Single-tray stations, plus one shared konsol where parallel trays sit within <paramref name="yanGap"/> edge to edge.</summary>
+        public static List<St> Layout(List<Run> runs, double spacing, double pay, double minSep, double yanGap)
+        {
+            List<St> res = new List<St>();
+            if (runs == null || runs.Count == 0) return res;
+            if (yanGap < 0) yanGap = 0;
+            int n = runs.Count;
+            int[] parent = new int[n];
+            for (int i = 0; i < n; i++) parent[i] = i;
+            for (int i = 0; i < n; i++)
+                for (int j = i + 1; j < n; j++)
+                    if (SideBySide(runs[i], runs[j], yanGap)) Union(parent, i, j);
+            List<int>[] comp = new List<int>[n];
+            for (int i = 0; i < n; i++)
+            {
+                int r = Find(parent, i);
+                if (comp[r] == null) comp[r] = new List<int>();
+                comp[r].Add(i);
+            }
+            for (int i = 0; i < n; i++)
+            {
+                if (comp[i] == null) continue;
+                if (comp[i].Count == 1) { res.AddRange(Stations(runs[comp[i][0]], spacing, pay, minSep, null)); continue; }
+                List<Run> group = comp[i].Select(k => runs[k]).ToList();
+                res.AddRange(Shared(group, spacing, pay, minSep, yanGap));
+            }
+            return res;
+        }
+
+        static List<St> Shared(List<Run> group, double spacing, double pay, double minSep, double yanGap)
+        {
+            List<St> res = new List<St>();
+            Run axis = group.OrderByDescending(r => r.L).First();
+            double ang = Math.Atan2(axis.Dy, axis.Dx);
+            List<Lane> lanes = new List<Lane>();
+            foreach (Run r in group)
+            {
+                Lane lane = new Lane { Run = r, HalfMax = HalfW(r) };
+                lane.Scale = axis.Dx * r.Dx + axis.Dy * r.Dy;
+                if (Math.Abs(lane.Scale) < 1e-6) lane.Scale = 1;
+                lane.T0 = (r.Ox - axis.Ox) * axis.Dx + (r.Oy - axis.Oy) * axis.Dy;
+                lane.Lat = Cross(axis.Dx, axis.Dy, r.Ox - axis.Ox, r.Oy - axis.Oy);
+                List<double[]> raw = new List<double[]>();
+                foreach (Cov c in r.Covs)
+                {
+                    if (!c.Selected || c.B - c.A <= 1e-6) continue;
+                    double a = lane.T0 + c.A * lane.Scale, b = lane.T0 + c.B * lane.Scale;
+                    if (b < a) { double tmp = a; a = b; b = tmp; }
+                    raw.Add(new[] { a, b });
+                }
+                raw.Sort((p, q) => p[0].CompareTo(q[0]));
+                foreach (double[] p in raw)
+                {
+                    if (lane.Sel.Count == 0 || p[0] > lane.Sel[lane.Sel.Count - 1][1] + 1e-4) lane.Sel.Add(p);
+                    else lane.Sel[lane.Sel.Count - 1][1] = Math.Max(lane.Sel[lane.Sel.Count - 1][1], p[1]);
+                }
+                if (lane.Sel.Count > 0) lanes.Add(lane);
+            }
+            if (lanes.Count < 2) { foreach (Run r in group) res.AddRange(Stations(r, spacing, pay, minSep, null)); return res; }
+
+            List<Ev> evs = new List<Ev>();
+            for (int i = 0; i < lanes.Count; i++)
+                foreach (double[] p in lanes[i].Sel)
+                {
+                    evs.Add(new Ev { T = p[0], Lane = i, Start = true });
+                    evs.Add(new Ev { T = p[1], Lane = i, Start = false });
+                }
+            evs.Sort((p, q) => { int c = p.T.CompareTo(q.T); if (c != 0) return c; return p.Start ? 1 : -1; });
+            bool[] on = new bool[lanes.Count];
+            List<double[]> portions = new List<double[]>();
+            List<double[]>[] blocked = new List<double[]>[lanes.Count];
+            for (int i = 0; i < lanes.Count; i++) blocked[i] = new List<double[]>();
+            double prev = evs.Count > 0 ? evs[0].T : 0;
+            int ei = 0;
+            while (ei < evs.Count)
+            {
+                double t = evs[ei].T;
+                if (t > prev + 1e-3) NoteSpan(lanes, on, prev, t, yanGap, portions, blocked);
+                while (ei < evs.Count && Math.Abs(evs[ei].T - t) <= 1e-4)
+                {
+                    on[evs[ei].Lane] = evs[ei].Start;
+                    ei++;
+                }
+                prev = t;
+            }
+            portions.Sort((p, q) => p[0].CompareTo(q[0]));
+            List<double[]> merged = new List<double[]>();
+            foreach (double[] p in portions)
+            {
+                if (merged.Count == 0 || p[0] > merged[merged.Count - 1][1] + 1) merged.Add(new[] { p[0], p[1] });
+                else merged[merged.Count - 1][1] = Math.Max(merged[merged.Count - 1][1], p[1]);
+            }
+            foreach (double[] por in merged)
+            {
+                if (por[1] - por[0] <= 1) continue;
+                List<double[]> pieces = new List<double[]> { new[] { por[0] + pay, por[1] - pay } };
+                pieces = pieces.Where(p => p[1] - p[0] > 1e-6).ToList();
+                foreach (Lane lane in lanes)
+                    foreach (double[] z in lane.Run.Zones)
+                    {
+                        double z0 = lane.T0 + z[0] * lane.Scale, z1 = lane.T0 + z[1] * lane.Scale;
+                        pieces = Subtract(pieces, z0, z1);
+                    }
+                foreach (double[] piece in pieces)
+                    foreach (double t in Fill(piece[0], piece[1], spacing, minSep))
+                        foreach (List<int> cluster in Clusters(lanes, onAt(lanes, t), t, yanGap))
+                        {
+                            if (cluster.Count < 2) continue;
+                            double pmin = double.MaxValue, pmax = double.MinValue;
+                            int kat = 1; double zSum = 0;
+                            foreach (int li in cluster)
+                            {
+                                Lane lane = lanes[li];
+                                double w = WidthAt(lane, t);
+                                double lat = lane.Lat;
+                                if (lat - w / 2 < pmin) pmin = lat - w / 2;
+                                if (lat + w / 2 > pmax) pmax = lat + w / 2;
+                                if (StackAt(lane, t) >= 2) kat = 2;
+                                zSum += lane.Run.Z;
+                            }
+                            double outer = pmax - pmin;
+                            if (outer < 1) continue;
+                            double mid = (pmin + pmax) / 2;
+                            res.Add(new St
+                            {
+                                X = axis.Ox + axis.Dx * t + (-axis.Dy) * mid,
+                                Y = axis.Oy + axis.Dy * t + axis.Dx * mid,
+                                Z = zSum / cluster.Count,
+                                En = outer,
+                                Kat = kat,
+                                Ang = ang,
+                                Span = true
+                            });
+                        }
+            }
+            for (int i = 0; i < lanes.Count; i++)
+            {
+                List<double[]> local = new List<double[]>();
+                foreach (double[] b in blocked[i])
+                {
+                    double a = (b[0] - lanes[i].T0) / lanes[i].Scale, c = (b[1] - lanes[i].T0) / lanes[i].Scale;
+                    if (c < a) { double tmp = a; a = c; c = tmp; }
+                    local.Add(new[] { a, c });
+                }
+                res.AddRange(Stations(lanes[i].Run, spacing, pay, minSep, local));
+            }
+            return res;
+        }
+
+        class Ev { public double T; public int Lane; public bool Start; }
+
+        static void NoteSpan(List<Lane> lanes, bool[] on, double a, double b, double yanGap, List<double[]> portions, List<double[]>[] blocked)
+        {
+            List<int> active = new List<int>();
+            for (int i = 0; i < on.Length; i++) if (on[i]) active.Add(i);
+            foreach (List<int> cluster in Clusters(lanes, active, (a + b) / 2, yanGap))
+            {
+                if (cluster.Count < 2) continue;
+                portions.Add(new[] { a, b });
+                foreach (int li in cluster) blocked[li].Add(new[] { a, b });
+            }
+        }
+
+        static List<int> onAt(List<Lane> lanes, double t)
+        {
+            List<int> active = new List<int>();
+            for (int i = 0; i < lanes.Count; i++)
+                foreach (double[] p in lanes[i].Sel)
+                    if (t >= p[0] - 1e-6 && t <= p[1] + 1e-6) { active.Add(i); break; }
+            return active;
+        }
+
+        static List<List<int>> Clusters(List<Lane> lanes, List<int> active, double t, double yanGap)
+        {
+            List<List<int>> res = new List<List<int>>();
+            bool[] seen = new bool[lanes.Count];
+            foreach (int seed in active)
+            {
+                if (seen[seed]) continue;
+                List<int> cluster = new List<int>();
+                List<int> stack = new List<int> { seed };
+                seen[seed] = true;
+                while (stack.Count > 0)
+                {
+                    int cur = stack[stack.Count - 1];
+                    stack.RemoveAt(stack.Count - 1);
+                    cluster.Add(cur);
+                    foreach (int oth in active)
+                    {
+                        if (seen[oth] || oth == cur) continue;
+                        if (!Close(lanes[cur], lanes[oth], t, yanGap)) continue;
+                        seen[oth] = true;
+                        stack.Add(oth);
+                    }
+                }
+                res.Add(cluster);
+            }
+            return res;
+        }
+
+        static bool Close(Lane a, Lane b, double t, double yanGap)
+        {
+            double lat = Math.Abs(a.Lat - b.Lat);
+            if (lat <= LatTol) return false;
+            double gap = lat - WidthAt(a, t) / 2 - WidthAt(b, t) / 2;
+            return gap <= yanGap;
+        }
+
+        static double WidthAt(Lane lane, double axisT)
+        {
+            double local = (axisT - lane.T0) / lane.Scale;
+            double w = 0;
+            foreach (Cov c in lane.Run.Covs)
+            {
+                if (!c.Selected || local < c.A - 0.5 || local > c.B + 0.5) continue;
+                if (c.VisW > w) w = c.VisW;
+            }
+            if (w <= 0) w = lane.HalfMax * 2;
+            return w;
+        }
+
+        static int StackAt(Lane lane, double axisT)
+        {
+            double local = (axisT - lane.T0) / lane.Scale;
+            int n = 0, sel = 0;
+            foreach (Cov c in lane.Run.Covs)
+            {
+                if (local < c.A - 0.5 || local > c.B + 0.5) continue;
+                n++;
+                if (c.Selected) sel++;
+            }
+            return sel == 0 ? 0 : n;
+        }
+
+        static double HalfW(Run r)
+        {
+            double w = 0;
+            foreach (Cov c in r.Covs) if (c.Selected && c.VisW > w) w = c.VisW;
+            return w / 2;
+        }
+
+        static bool SideBySide(Run a, Run b, double yanGap)
+        {
+            double cr = Math.Abs(Cross(a.Dx, a.Dy, b.Dx, b.Dy));
+            double dot = a.Dx * b.Dx + a.Dy * b.Dy;
+            if (cr > Math.Sin(AngTol) || dot < 0.5) return false;
+            double lat0 = Math.Abs(Cross(a.Dx, a.Dy, b.Ox - a.Ox, b.Oy - a.Oy));
+            double lat1 = Math.Abs(Cross(a.Dx, a.Dy, b.Ox + b.Dx * b.L - a.Ox, b.Oy + b.Dy * b.L - a.Oy));
+            double lat = (lat0 + lat1) / 2;
+            if (lat <= LatTol) return false;
+            if (lat - HalfW(a) - HalfW(b) > yanGap) return false;
+            double sa0, sa1, sb0, sb1;
+            SelSpan(a, out sa0, out sa1);
+            SelSpan(b, out sb0, out sb1);
+            double tb0 = (b.Ox + b.Dx * sb0 - a.Ox) * a.Dx + (b.Oy + b.Dy * sb0 - a.Oy) * a.Dy;
+            double tb1 = (b.Ox + b.Dx * sb1 - a.Ox) * a.Dx + (b.Oy + b.Dy * sb1 - a.Oy) * a.Dy;
+            double lo = Math.Max(sa0, Math.Min(tb0, tb1));
+            double hi = Math.Min(sa1, Math.Max(tb0, tb1));
+            return hi - lo > 1;
+        }
+
+        static void SelSpan(Run r, out double a, out double b)
+        {
+            a = double.MaxValue; b = double.MinValue;
+            foreach (Cov c in r.Covs)
+                if (c.Selected) { if (c.A < a) a = c.A; if (c.B > b) b = c.B; }
+            if (a > b) { a = 0; b = r.L; }
+        }
+
+        static int Find(int[] parent, int i)
+        {
+            while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+            return i;
+        }
+
+        static void Union(int[] parent, int a, int b)
+        {
+            a = Find(parent, a); b = Find(parent, b);
+            if (a != b) parent[a] = b;
         }
 
         static List<double[]> MergeSelected(Run run)
@@ -441,9 +739,9 @@ namespace CadAiDesigner
 
                 while (true)
                 {
-                    string msg = "\nAralık=" + F(ks.aralik) + "  Uç/dal payı=" + F(ks.pay) + "  EN payı=" + F(ks.ek) +
-                                 "\n[Aralik/Pay/Ek/Devam] <Devam>: ";
-                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "Aralik Pay Ek Devam") { AllowNone = true };
+                    string msg = "\nAralık=" + F(ks.aralik) + "  Uç/dal payı=" + F(ks.pay) + "  EN payı=" + F(ks.ek) + "  Yan yana=" + F(ks.yan) +
+                                 "\n[Aralik/Pay/Ek/Yan/Devam] <Devam>: ";
+                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "Aralik Pay Ek Yan Devam") { AllowNone = true };
                     PromptResult kr = ed.GetKeywords(ko);
                     if (kr.Status == PromptStatus.Cancel) return;
                     if (kr.Status == PromptStatus.None || kr.StringResult == "Devam") break;
@@ -465,10 +763,16 @@ namespace CadAiDesigner
                         if (r.Status == PromptStatus.Cancel) return;
                         if (r.Status == PromptStatus.OK && r.Value >= 0) ks.ek = r.Value;
                     }
+                    else if (kr.StringResult == "Yan")
+                    {
+                        PromptDoubleResult r = ed.GetDouble(new PromptDoubleOptions("\nYan yana boşluk (kenardan kenara; bu kadar ve daha yakınsa tek konsol): ") { AllowNone = true, AllowNegative = false, AllowZero = true, DefaultValue = ks.yan, UseDefaultValue = true });
+                        if (r.Status == PromptStatus.Cancel) return;
+                        if (r.Status == PromptStatus.OK && r.Value >= 0) ks.yan = r.Value;
+                    }
                 }
                 ks.Save();
 
-                int made = 0, single = 0, doub = 0, skipped = 0, trayN = 0, runN = 0, miss = 0, distFail = 0;
+                int made = 0, single = 0, doub = 0, skipped = 0, trayN = 0, runN = 0, miss = 0, distFail = 0, over = 0;
                 bool katMissing = false;
                 List<string> notes = new List<string>();
                 using (doc.LockDocument())
@@ -565,12 +869,10 @@ namespace CadAiDesigner
                         }
                         if (!space.IsWriteEnabled) space.UpgradeOpen();
 
-                        foreach (KonsolGeo.Run run in runs)
+                        foreach (KonsolGeo.St st in KonsolGeo.Layout(runs, ks.aralik, ks.pay, ks.atla, ks.yan))
                         {
-                            double trayAng = Math.Atan2(run.Dy, run.Dx);
-                            double want = trayAng + sign * Math.PI / 2.0;
+                            double want = st.Ang + sign * Math.PI / 2.0;
                             double rot = Wrap(sample.Rotation + (want - sampleAng));
-                            foreach (KonsolGeo.St st in KonsolGeo.Stations(run, ks.aralik, ks.pay, ks.atla))
                             {
                                 if (NearAny(occ, st.X, st.Y, ks.atla)) { skipped++; continue; }
                                 double target = st.En + ks.ek;
@@ -585,13 +887,19 @@ namespace CadAiDesigner
                                 b.Rotation = rot;
                                 b.Position = at;
                                 CopyDyn(sample, b, distName);
-                                bool distOk = SetDist(b, distName, target, allowed);
+                                bool clamped;
+                                bool distOk = SetDist(b, distName, target, allowed, st.Span, out clamped);
                                 double distNow = PropNum(b, distName);
                                 ShiftAnchor(tx, b, at, sampleDist, target);
                                 double distAfter = PropNum(b, distName);
                                 if (!distOk || double.IsNaN(distAfter) || (!double.IsNaN(distNow) && Math.Abs(distAfter - distNow) > 0.05))
-                                    distOk = SetDist(b, distName, target, allowed);
+                                {
+                                    bool again;
+                                    distOk = SetDist(b, distName, target, allowed, st.Span, out again);
+                                    if (again) clamped = true;
+                                }
                                 if (!distOk) distFail++;
+                                if (clamped) over++;
                                 AddAttribs(tx, b);
                                 if (!CopyAtts(tx, sample, b, st.Kat)) katMissing = true;
                                 occ.Add(new Point2d(st.X, st.Y));
@@ -606,13 +914,14 @@ namespace CadAiDesigner
                 }
 
                 if (distFail > 0) notes.Add(distFail + " konsolda Dist1 yazılamadı.");
+                if (over > 0) notes.Add(over + " konsolda Dist1 listenin en büyüğüne kısıldı (gerekenden kısa).");
                 if (katMissing) notes.Add("KAT attribute bulunamadı.");
                 string sum = made == 0
                     ? "Konsol yerleştirilmedi (" + trayN + " tava, " + runN + " hat)."
                     : "Konsol: " + made + " adet (tek kat " + single + ", çift kat " + doub + "), " + trayN + " tava, " + runN + " hat.";
                 if (skipped > 0) sum += " Atlanan (yakınında konsol var): " + skipped + ".";
                 if (miss > 0) sum += " Ölçüsü okunamayan tava: " + miss + ".";
-                sum += " Aralık " + F(ks.aralik) + ", pay " + F(ks.pay) + ", EN+" + F(ks.ek) + ".";
+                sum += " Aralık " + F(ks.aralik) + ", pay " + F(ks.pay) + ", EN+" + F(ks.ek) + ", yan yana " + F(ks.yan) + ".";
                 if (notes.Count > 0) sum += " Not: " + string.Join(" ", notes.Distinct().Take(4));
                 if (made > 0) sum += " Geri almak için UNDO.";
                 ed.WriteMessage("\n" + sum + "\n");
@@ -791,6 +1100,35 @@ namespace CadAiDesigner
             return list;
         }
 
+        /// <summary>Smallest allowed value that is still at least <paramref name="want"/>. Above the list max, the max is used and <paramref name="clamped"/> is set.</summary>
+        static object SnapCeil(List<object> allowed, double want, out bool clamped)
+        {
+            clamped = false;
+            bool list = allowed != null && allowed.Count >= 3;
+            List<double> vals = new List<double>();
+            List<object> objs = new List<object>();
+            IEnumerable<object> src = list ? (IEnumerable<object>)allowed : DistList.Cast<object>();
+            foreach (object o in src)
+            {
+                double d;
+                if (!TryD(o, out d)) continue;
+                vals.Add(d);
+                objs.Add(list ? o : (object)d);
+            }
+            if (vals.Count == 0) return want;
+            int ceil = -1;
+            for (int i = 0; i < vals.Count; i++)
+            {
+                if (vals[i] + 1e-6 < want) continue;
+                if (ceil < 0 || vals[i] < vals[ceil]) ceil = i;
+            }
+            if (ceil >= 0) return objs[ceil];
+            int im = 0;
+            for (int i = 1; i < vals.Count; i++) if (vals[i] > vals[im]) im = i;
+            clamped = true;
+            return objs[im];
+        }
+
         static object SnapValue(List<object> allowed, double want)
         {
             bool list = allowed != null && allowed.Count >= 3;
@@ -811,11 +1149,12 @@ namespace CadAiDesigner
             return best;
         }
 
-        static bool SetDist(BlockReference br, string name, double want, List<object> allowed)
+        static bool SetDist(BlockReference br, string name, double want, List<object> allowed, bool ceil, out bool clamped)
         {
+            clamped = false;
             DynamicBlockReferenceProperty p = Fittings.Prop(br, name);
             if (p == null) return false;
-            object snap = SnapValue(allowed, want);
+            object snap = ceil ? SnapCeil(allowed, want, out clamped) : SnapValue(allowed, want);
             try { p.Value = snap; return true; }
             catch (System.Exception)
             {
