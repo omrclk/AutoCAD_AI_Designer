@@ -85,6 +85,8 @@ namespace CadAiDesigner
             public double Ox, Oy, Dx, Dy, Z, L;
             public List<Cov> Covs = new List<Cov>();
             public List<double[]> Zones = new List<double[]>();
+            /// <summary>True when that end of the run meets the side of another tray (a T), so the walk starts there.</summary>
+            public bool StartTied, EndTied;
         }
 
         internal class St
@@ -298,7 +300,7 @@ namespace CadAiDesigner
             return w / 2;
         }
 
-        /// <summary>Both ends of each allowed interval, then evenly filled so the step is at most <paramref name="spacing"/>.</summary>
+        /// <summary>Regular spacing from the start. A hit on a T is moved to <paramref name="pay"/> before the branch and the count restarts from there.</summary>
         public static List<St> Stations(Run run, double spacing, double pay, double minSep, List<double[]> blocked)
         {
             List<St> res = new List<St>();
@@ -308,17 +310,24 @@ namespace CadAiDesigner
             if (spacing < 1) spacing = run.L;
             double ang = Math.Atan2(run.Dy, run.Dx);
             double outerA = body[0][0], outerB = body[body.Count - 1][1];
-            List<double[]> pieces = body;
-            pieces = Subtract(pieces, outerA, outerA + pay);
-            pieces = Subtract(pieces, outerB - pay, outerB);
-            foreach (double[] z in run.Zones) pieces = Subtract(pieces, z[0], z[1]);
+            List<double[]> pieces = new List<double[]>(body);
             if (blocked != null)
                 foreach (double[] blk in blocked)
                     if (blk != null && blk.Length >= 2) pieces = Subtract(pieces, blk[0], blk[1]);
             foreach (double[] p in pieces)
             {
-                foreach (double t in Fill(p[0], p[1], spacing, minSep))
+                bool lowOuter = p[0] <= outerA + 0.5, highOuter = p[1] >= outerB - 0.5;
+                double lo = lowOuter ? p[0] + pay : p[0];
+                double hi = highOuter ? p[1] - pay : p[1];
+                if (hi < lo - 1e-6) continue;
+                bool fromHigh = highOuter && run.EndTied && !(lowOuter && run.StartTied);
+                bool forceLast = fromHigh ? lowOuter : highOuter;
+                List<double> ts = fromHigh
+                    ? Walk(hi, lo, -1, spacing, pay, run.Zones, forceLast, p[0], p[1])
+                    : Walk(lo, hi, +1, spacing, pay, run.Zones, forceLast, p[0], p[1]);
+                foreach (double t in ts)
                 {
+                    if (t < p[0] - 1e-4 || t > p[1] + 1e-4) continue;
                     int kat; double en;
                     if (!CoverAt(run, t, out kat, out en)) continue;
                     res.Add(new St
@@ -335,12 +344,81 @@ namespace CadAiDesigner
             return res;
         }
 
+        /// <summary>
+        /// Places from <paramref name="first"/> toward <paramref name="last"/> at a fixed step.
+        /// A point inside a branch zone is moved to the near edge (already <paramref name="close"/> before the branch)
+        /// and the step restarts there. When <paramref name="forceLast"/> is set, <paramref name="last"/> is kept;
+        /// if the previous konsol is closer than <paramref name="close"/>, that previous one is dropped.
+        /// </summary>
+        static List<double> Walk(double first, double last, int dir, double spacing, double close, List<double[]> zones, bool forceLast, double lim0, double lim1)
+        {
+            List<double> pts = new List<double>();
+            if (dir == 0 || spacing < 1e-6) return pts;
+            if ((last - first) * dir < -1e-6) return pts;
+            double lo = Math.Min(lim0, lim1), hi = Math.Max(lim0, lim1);
+            double t = first;
+            double prev = double.NaN;
+            int guard = 0;
+            while ((last - t) * dir > 1e-4 && guard++ < 10000)
+            {
+                if (!double.IsNaN(prev) && Math.Abs(t - prev) < 1e-6) t += dir * spacing;
+                prev = t;
+                double back, far;
+                if (InZone(t, zones, dir, out back, out far))
+                {
+                    bool onTray = back >= lo - 1e-4 && back <= hi + 1e-4;
+                    bool usable = onTray && (t - back) * dir > -1e-4 && (last - back) * dir > -1e-4
+                        && (pts.Count == 0 || (back - pts[pts.Count - 1]) * dir > 1e-4);
+                    if (usable)
+                    {
+                        if (pts.Count > 0 && Math.Abs(back - pts[pts.Count - 1]) < close) pts.RemoveAt(pts.Count - 1);
+                        if (pts.Count == 0 || Math.Abs(back - pts[pts.Count - 1]) > 1e-4) pts.Add(back);
+                        t = back + dir * spacing;
+                    }
+                    else
+                    {
+                        double nxt = (pts.Count > 0 ? pts[pts.Count - 1] : first) + dir * spacing;
+                        t = (nxt - far) * dir > 0 ? nxt : far + dir * 1e-3;
+                    }
+                }
+                else if (t >= lo - 1e-4 && t <= hi + 1e-4)
+                {
+                    pts.Add(t);
+                    t += dir * spacing;
+                }
+                else t += dir * spacing;
+            }
+            if (forceLast && last >= lo - 1e-4 && last <= hi + 1e-4 && !InZone(last, zones, dir, out _, out _))
+            {
+                if (pts.Count == 0 || Math.Abs(last - pts[pts.Count - 1]) >= close - 1e-9) pts.Add(last);
+                else if (Math.Abs(last - pts[pts.Count - 1]) > 1e-4) pts[pts.Count - 1] = last;
+            }
+            return pts;
+        }
+
+        static bool InZone(double t, List<double[]> zones, int dir, out double back, out double far)
+        {
+            back = far = 0;
+            bool hit = false;
+            if (zones == null) return false;
+            foreach (double[] z in zones)
+            {
+                if (z == null || z.Length < 2) continue;
+                double z0 = Math.Min(z[0], z[1]), z1 = Math.Max(z[0], z[1]);
+                if (t < z0 - 1e-6 || t > z1 + 1e-6) continue;
+                double b = dir >= 0 ? z0 : z1, f = dir >= 0 ? z1 : z0;
+                if (!hit || (b - back) * dir > 0) { hit = true; back = b; far = f; }
+            }
+            return hit;
+        }
+
         /// <summary>Single-tray stations, plus one shared konsol where parallel trays sit within <paramref name="yanGap"/> edge to edge.</summary>
         public static List<St> Layout(List<Run> runs, double spacing, double pay, double minSep, double yanGap)
         {
             List<St> res = new List<St>();
             if (runs == null || runs.Count == 0) return res;
             if (yanGap < 0) yanGap = 0;
+            MarkEnds(runs);
             int n = runs.Count;
             int[] parent = new int[n];
             for (int i = 0; i < n; i++) parent[i] = i;
@@ -427,20 +505,18 @@ namespace CadAiDesigner
                 if (merged.Count == 0 || p[0] > merged[merged.Count - 1][1] + 1) merged.Add(new[] { p[0], p[1] });
                 else merged[merged.Count - 1][1] = Math.Max(merged[merged.Count - 1][1], p[1]);
             }
+            List<double[]> axisZones = new List<double[]>();
+            foreach (Lane lane in lanes)
+                foreach (double[] z in lane.Run.Zones)
+                {
+                    double z0 = lane.T0 + z[0] * lane.Scale, z1 = lane.T0 + z[1] * lane.Scale;
+                    axisZones.Add(new[] { z0, z1 });
+                }
             foreach (double[] por in merged)
             {
                 if (por[1] - por[0] <= 1) continue;
-                List<double[]> pieces = new List<double[]> { new[] { por[0] + pay, por[1] - pay } };
-                pieces = pieces.Where(p => p[1] - p[0] > 1e-6).ToList();
-                foreach (Lane lane in lanes)
-                    foreach (double[] z in lane.Run.Zones)
-                    {
-                        double z0 = lane.T0 + z[0] * lane.Scale, z1 = lane.T0 + z[1] * lane.Scale;
-                        pieces = Subtract(pieces, z0, z1);
-                    }
-                foreach (double[] piece in pieces)
-                    foreach (double t in Fill(piece[0], piece[1], spacing, minSep))
-                        foreach (List<int> cluster in Clusters(lanes, onAt(lanes, t), t, yanGap))
+                foreach (double t in Walk(por[0] + pay, por[1] - pay, +1, spacing, pay, axisZones, true, por[0], por[1]))
+                    foreach (List<int> cluster in Clusters(lanes, onAt(lanes, t), t, yanGap))
                         {
                             if (cluster.Count < 2) continue;
                             double pmin = double.MaxValue, pmax = double.MinValue;
@@ -569,6 +645,31 @@ namespace CadAiDesigner
             return sel == 0 ? 0 : n;
         }
 
+        /// <summary>An end that lands on the side of another tray is the start of a T branch, so spacing is counted from there.</summary>
+        static void MarkEnds(List<Run> runs)
+        {
+            foreach (Run r in runs)
+            {
+                r.StartTied = EndTied(r, 0, runs);
+                r.EndTied = EndTied(r, r.L, runs);
+            }
+        }
+
+        static bool EndTied(Run r, double tEnd, List<Run> runs)
+        {
+            double x = r.Ox + r.Dx * tEnd, y = r.Oy + r.Dy * tEnd;
+            foreach (Run o in runs)
+            {
+                if (o == r) continue;
+                if (Math.Abs(r.Dx * o.Dx + r.Dy * o.Dy) > 0.5) continue;
+                double t, lat;
+                Project(o, x, y, out t, out lat);
+                if (t <= EndSnap || t >= o.L - EndSnap) continue;
+                if (lat <= HalfAt(o, t) + HalfAt(r, tEnd) + Math.Max(LatTol, 15)) return true;
+            }
+            return false;
+        }
+
         static double HalfW(Run r)
         {
             double w = 0;
@@ -638,18 +739,6 @@ namespace CadAiDesigner
                 if (b < p[1] - 1e-9) next.Add(new[] { b, p[1] });
             }
             return next.Where(p => p[1] - p[0] > 1e-6).ToList();
-        }
-
-        static List<double> Fill(double a, double b, double spacing, double minSep)
-        {
-            List<double> r = new List<double>();
-            double len = b - a;
-            if (len <= Math.Max(0, minSep)) { r.Add((a + b) / 2); return r; }
-            int gaps = (int)Math.Ceiling(len / spacing - 1e-9);
-            if (gaps < 1) gaps = 1;
-            double step = len / gaps;
-            for (int i = 0; i <= gaps; i++) r.Add(a + step * i);
-            return r;
         }
 
         static bool CoverAt(Run run, double t, out int kat, out double en)
