@@ -201,3 +201,11 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+## Metin Excel (TEXTEXCEL / AIDTEXTEXCEL)
+
+Panel: **Metin Excel**. TEXT ve MTEXT yazılarını tek sütuna (A) aktarır. Pencere seçimi; filtre yalnız TEXT/MTEXT — blok içindeki yazı, attribute ve diğer nesneler alınmaz. Önceden seçili yazı varsa o kullanılır.
+
+- Sıra `[Otomatik/Dikey/Yatay]`, Enter = Otomatik. Konum, hizalama/ekleme noktasıdır (WCS). Otomatik: Y yayılımı X'ten büyük veya eşitse yukarıdan aşağı, aynı Y'de soldan sağa; X daha büyükse soldan sağa, aynı X'te yukarıdan aşağı. Her yazı Excel'de bir satırdır.
+- MTEXT düz metin (`Text`); biçim kodları ayıklanır. Bir MTEXT içindeki satır sonları tek hücrede kalır.
+- Kayıt penceresi çizim klasöründe `<dwg>_metin_<tarih>.xlsx` önerir (kaydedilmemiş çizimde `%APPDATA%\CadAiDesigner\metraj`). Dosya açılır; adet ve yol komut satırında ve panelde yazılır. Çizim değişmez.
