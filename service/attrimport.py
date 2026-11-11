@@ -18,6 +18,16 @@ def _key(s):
     return re.sub(r'\s*\(.*\)\s*$', '', str(s or '')).strip().lower()
 
 
+def _meta(raw):
+    """Identity columns. 'Tip' is the entity-type column (MLEADER/BLOK); attribute tag TIP is kept (different header text)."""
+    if raw is None:
+        return True
+    s = str(raw).strip()
+    if s == attrexport.TYPE_COL:
+        return True
+    return _key(s) in NON_ATTR
+
+
 def read_sheets(path):
     """[(sheet name, rows)] in workbook order. Cells: ('s', text) for text, ('n', raw) for numbers."""
     with zipfile.ZipFile(path) as z:
@@ -120,7 +130,7 @@ def parse(sheets):
         bi = head.index('blok') if 'blok' in head else None
         xi = head.index('x') if 'x' in head else None
         yi = head.index('y') if 'y' in head else None
-        tags = [(i, raw_head[i]) for i in range(len(head)) if head[i] and head[i] not in NON_ATTR]
+        tags = [(i, raw_head[i]) for i in range(len(head)) if raw_head[i] and not _meta(raw_head[i])]
         target = allrows if _key(name) in ALL_SHEET else per
         for ln, r in enumerate(rows[1:], 2):
             if not r or all(not c[1] for c in r):

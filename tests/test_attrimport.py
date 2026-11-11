@@ -73,7 +73,8 @@ class TestAttImport(unittest.TestCase):
 
     def test_handle_column_label(self):
         rows = attrimport.read_sheets(self.src)[1][1]
-        self.assertIn('de\u011fi\u015ftirmeyin', rows[0][2][1])
+        self.assertTrue(any('de\u011fi\u015ftirmeyin' in (c[1] or '') for c in rows[0]))
+        self.assertEqual(rows[0][1][1], 'Tip')
 
     def test_untouched_roundtrip_no_changes(self):
         r = self.run_edit(lambda n, rows: None)
@@ -132,6 +133,25 @@ class TestAttImport(unittest.TestCase):
         self.assertEqual([(c['handle'], c['tag'], c['new']) for c in r['changes']], [('2C', 'W', '18')])
         self.assertEqual(len(r['fallback']), 1)
         self.assertEqual(len(r['not_found']), 1)
+
+    def test_mleader_type_column_roundtrip(self):
+        """Tip=MLEADER is not an attribute; a TIP tag still round-trips by handle."""
+        blocks = [blk('4D', 'KABLO', {'TIP': 'N2XH', 'BOY': '1,80 m'})]
+        blocks[0]['type'] = 'MLEADER'
+        src = os.path.join(self.d, 'ml_attribute.xlsx')
+        attrexport.export({'blocks': blocks, 'export_path': src, 'tag_order': {'KABLO': ['TIP', 'BOY']}})
+
+        def edit(n, rows):
+            if n == 'KABLO':
+                head = [c[1] for c in rows[0]]
+                rows[1][head.index('Tip')] = ('s', 'BLOK')
+                rows[1][head.index('TIP')] = ('s', 'NYY')
+                rows[1][head.index('BOY')] = ('s', '2,40 m')
+        dst = os.path.join(self.d, 'ml_edited.xlsx')
+        excel_style(src, dst, edit)
+        r = attrimport.diff({'path': dst, 'blocks': blocks})
+        got = dict(((c['handle'], c['tag']), c['new']) for c in r['changes'])
+        self.assertEqual(got, {('4D', 'TIP'): 'NYY', ('4D', 'BOY'): '2,40 m'})
 
     def test_fmt_number(self):
         self.assertEqual(attrimport.fmt_number('60', '1'), '60')

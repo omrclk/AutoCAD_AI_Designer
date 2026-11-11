@@ -8,10 +8,21 @@ using System.Web.Script.Serialization;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
+using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
 
 namespace CadAiDesigner
 {
+    /// <summary>Block-content attributes read from one MLeader.</summary>
+    internal class LeaderInfo
+    {
+        public string Name;
+        public double X, Y;
+        public readonly List<string> Order = new List<string>();
+        public readonly List<KeyValuePair<string, string>> Values = new List<KeyValuePair<string, string>>();
+        public readonly HashSet<string> Const = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+
     internal class AttExportRequest
     {
         public HashSet<ObjectId> Only;     // selection (null = whole drawing)
@@ -27,16 +38,96 @@ namespace CadAiDesigner
     {
         static readonly JavaScriptSerializer Js = new JavaScriptSerializer { MaxJsonLength = 64000000, RecursionLimit = 40 };
 
-        static string EffName(Transaction tx, BlockReference br)
+        internal static string EffName(Transaction tx, BlockReference br)
         {
             try { return ((BlockTableRecord)tx.GetObject(br.IsDynamicBlock ? br.DynamicBlockTableRecord : br.BlockTableRecord, OpenMode.ForRead)).Name; }
             catch (System.Exception) { return br.Name; }
         }
 
-        static string AttText(AttributeReference ar)
+        internal static string AttText(AttributeReference ar)
         {
-            try { if (ar.IsMTextAttribute && ar.MTextAttribute != null) return ar.MTextAttribute.Text; } catch (System.Exception) { }
-            return ar.TextString;
+            if (ar == null) return "";
+            try { if (ar.IsMTextAttribute && ar.MTextAttribute != null) return ar.MTextAttribute.Text ?? ""; } catch (System.Exception) { }
+            return ar.TextString ?? "";
+        }
+
+        internal static string DefText(AttributeDefinition ad)
+        {
+            if (ad == null) return "";
+            string v = ad.TextString;
+            try { if (ad.IsMTextAttributeDefinition && ad.MTextAttributeDefinition != null) v = ad.MTextAttributeDefinition.Text; } catch (System.Exception) { }
+            return v ?? "";
+        }
+
+        /// <summary>Writes an attribute value, keeping MText contents when the attribute is multiline.</summary>
+        internal static void SetAttText(AttributeReference ar, string v)
+        {
+            bool mt = false; try { mt = ar.IsMTextAttribute; } catch (System.Exception) { }
+            if (mt) { try { MText m = ar.MTextAttribute; m.Contents = v; ar.MTextAttribute = m; ar.UpdateMTextAttribute(); } catch (System.Exception) { ar.TextString = v; } }
+            else ar.TextString = v;
+        }
+
+        internal static bool IsBlockContent(MLeader ml)
+        {
+            if (ml == null) return false;
+            try { return ml.ContentType == ContentType.BlockContent && !ml.BlockContentId.IsNull; }
+            catch (System.Exception) { return false; }
+        }
+
+        /// <summary>Block-content attributes of an MLeader (definition order). Null when the leader has no block content.
+        /// GetBlockAttribute returns a non-database copy; SetLeaderAttr writes it back.</summary>
+        internal static LeaderInfo ReadLeader(Transaction tx, MLeader ml)
+        {
+            if (!IsBlockContent(ml)) return null;
+            BlockTableRecord btr = tx.GetObject(ml.BlockContentId, OpenMode.ForRead) as BlockTableRecord;
+            if (btr == null) return null;
+            LeaderInfo info = new LeaderInfo { Name = btr.Name };
+            try { info.X = ml.BlockPosition.X; info.Y = ml.BlockPosition.Y; }
+            catch (System.Exception)
+            {
+                try { Extents3d ex = ml.GeometricExtents; info.X = ex.MinPoint.X; info.Y = ex.MinPoint.Y; }
+                catch (System.Exception) { }
+            }
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ObjectId id in btr)
+            {
+                AttributeDefinition ad = tx.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
+                if (ad == null || !seen.Add(ad.Tag)) continue;
+                info.Order.Add(ad.Tag);
+                if (ad.Constant)
+                {
+                    info.Const.Add(ad.Tag);
+                    info.Values.Add(new KeyValuePair<string, string>(ad.Tag, DefText(ad)));
+                    continue;
+                }
+                string val = DefText(ad);
+                try
+                {
+                    AttributeReference ar = ml.GetBlockAttribute(ad.ObjectId);
+                    if (ar != null) val = AttText(ar);
+                }
+                catch (System.Exception) { }
+                info.Values.Add(new KeyValuePair<string, string>(ad.Tag, val ?? ""));
+            }
+            return info;
+        }
+
+        /// <summary>Writes one block-content attribute. The leader is upgraded to write inside the caller's transaction.</summary>
+        internal static void SetLeaderAttr(MLeader ml, AttributeDefinition ad, string value)
+        {
+            if (ml == null || ad == null || ad.Constant) return;
+            AttributeReference ar = null;
+            try { ar = ml.GetBlockAttribute(ad.ObjectId); }
+            catch (System.Exception) { }
+            if (ar == null)
+            {
+                ar = new AttributeReference();
+                try { ar.SetAttributeFromBlock(ad, Matrix3d.Identity); }
+                catch (System.Exception) { try { ar.Tag = ad.Tag; } catch (System.Exception) { } }
+            }
+            SetAttText(ar, value ?? "");
+            if (!ml.IsWriteEnabled) ml.UpgradeOpen();
+            ml.SetBlockAttribute(ad.ObjectId, ar);
         }
 
         /// <summary>Tag order and constant attribute values of a block definition.</summary>
@@ -49,12 +140,7 @@ namespace CadAiDesigner
                 AttributeDefinition ad = tx.GetObject(id, OpenMode.ForRead) as AttributeDefinition;
                 if (ad == null) continue;
                 if (!order.Contains(ad.Tag)) order.Add(ad.Tag);
-                if (ad.Constant)
-                {
-                    string v = ad.TextString;
-                    try { if (ad.IsMTextAttributeDefinition && ad.MTextAttributeDefinition != null) v = ad.MTextAttributeDefinition.Text; } catch (System.Exception) { }
-                    consts.Add(new KeyValuePair<string, string>(ad.Tag, v));
-                }
+                if (ad.Constant) consts.Add(new KeyValuePair<string, string>(ad.Tag, DefText(ad)));
             }
         }
 
@@ -81,14 +167,23 @@ namespace CadAiDesigner
                 foreach (KeyValuePair<string, ObjectId> sp in Spaces(tx, db, allLayouts))
                     foreach (ObjectId id in (BlockTableRecord)tx.GetObject(sp.Value, OpenMode.ForRead))
                     {
-                        if (id.ObjectClass.DxfName != "INSERT") continue;
-                        BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
-                        if (br == null) continue;
-                        bool has = br.AttributeCollection.Count > 0;
-                        if (!has) { try { has = ((BlockTableRecord)tx.GetObject(br.BlockTableRecord, OpenMode.ForRead)).HasAttributeDefinitions; } catch (System.Exception) { } }
-                        if (!has) continue;
-                        string n = EffName(tx, br);
-                        int c; d.TryGetValue(n, out c); d[n] = c + 1;
+                        string dxf = id.ObjectClass.DxfName;
+                        if (dxf == "INSERT")
+                        {
+                            BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
+                            if (br == null) continue;
+                            bool has = br.AttributeCollection.Count > 0;
+                            if (!has) { try { has = ((BlockTableRecord)tx.GetObject(br.BlockTableRecord, OpenMode.ForRead)).HasAttributeDefinitions; } catch (System.Exception) { } }
+                            if (!has) continue;
+                            string n = EffName(tx, br);
+                            int c; d.TryGetValue(n, out c); d[n] = c + 1;
+                        }
+                        else if (dxf == "MULTILEADER")
+                        {
+                            LeaderInfo li = ReadLeader(tx, tx.GetObject(id, OpenMode.ForRead) as MLeader);
+                            if (li == null || li.Values.Count == 0) continue;
+                            int c; d.TryGetValue(li.Name, out c); d[li.Name] = c + 1;
+                        }
                     }
                 tx.Commit();
             }
@@ -105,37 +200,62 @@ namespace CadAiDesigner
                     foreach (ObjectId id in (BlockTableRecord)tx.GetObject(sp.Value, OpenMode.ForRead))
                     {
                         if (rq.Only != null && !rq.Only.Contains(id)) continue;
-                        if (id.ObjectClass.DxfName != "INSERT") continue;
-                        BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
-                        if (br == null) continue;
-                        string name = EffName(tx, br);
-                        if (!string.IsNullOrEmpty(rq.Block) && !string.Equals(name, rq.Block, StringComparison.OrdinalIgnoreCase)) continue;
-                        List<string> ord = new List<string>();
-                        List<KeyValuePair<string, string>> consts = new List<KeyValuePair<string, string>>();
-                        try { DefInfo(tx, br.IsDynamicBlock ? br.DynamicBlockTableRecord : br.BlockTableRecord, ord, consts); } catch (System.Exception) { }
-                        List<object> attrs = new List<object>();
-                        HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        foreach (ObjectId aid in br.AttributeCollection)
+                        string dxf = id.ObjectClass.DxfName;
+                        if (dxf == "INSERT")
                         {
-                            AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
-                            if (ar == null || !seen.Add(ar.Tag)) continue;
-                            attrs.Add(new object[] { ar.Tag, AttText(ar) ?? "" });
-                            if (!ord.Contains(ar.Tag)) ord.Add(ar.Tag);
+                            BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
+                            if (br == null) continue;
+                            string name = EffName(tx, br);
+                            if (!string.IsNullOrEmpty(rq.Block) && !string.Equals(name, rq.Block, StringComparison.OrdinalIgnoreCase)) continue;
+                            List<string> ord = new List<string>();
+                            List<KeyValuePair<string, string>> consts = new List<KeyValuePair<string, string>>();
+                            try { DefInfo(tx, br.IsDynamicBlock ? br.DynamicBlockTableRecord : br.BlockTableRecord, ord, consts); } catch (System.Exception) { }
+                            List<object> attrs = new List<object>();
+                            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            foreach (ObjectId aid in br.AttributeCollection)
+                            {
+                                AttributeReference ar = tx.GetObject(aid, OpenMode.ForRead) as AttributeReference;
+                                if (ar == null || !seen.Add(ar.Tag)) continue;
+                                attrs.Add(new object[] { ar.Tag, AttText(ar) ?? "" });
+                                if (!ord.Contains(ar.Tag)) ord.Add(ar.Tag);
+                            }
+                            foreach (KeyValuePair<string, string> c in consts) if (seen.Add(c.Key)) attrs.Add(new object[] { c.Key, c.Value ?? "" });
+                            if (attrs.Count == 0 && rq.AttributedOnly) continue;
+                            NoteOrder(order, name, ord);
+                            blocks.Add(Row("BLOK", name, br.Layer, br.Handle.ToString(), br.Position.X, br.Position.Y, sp.Key, attrs, consts.Select(c => c.Key).ToList()));
                         }
-                        foreach (KeyValuePair<string, string> c in consts) if (seen.Add(c.Key)) attrs.Add(new object[] { c.Key, c.Value ?? "" });
-                        if (attrs.Count == 0 && rq.AttributedOnly) continue;
-                        List<string> o;
-                        if (!order.TryGetValue(name, out o)) order[name] = o = new List<string>();
-                        foreach (string t in ord) if (!o.Contains(t)) o.Add(t);
-                        blocks.Add(new Dictionary<string, object>
+                        else if (dxf == "MULTILEADER")
                         {
-                            { "block", name }, { "layer", br.Layer }, { "handle", br.Handle.ToString() },
-                            { "x", Math.Round(br.Position.X, 3) }, { "y", Math.Round(br.Position.Y, 3) }, { "space", sp.Key }, { "attrs", attrs }, { "const_tags", consts.Select(c => c.Key).ToList() }
-                        });
+                            MLeader ml = tx.GetObject(id, OpenMode.ForRead) as MLeader;
+                            LeaderInfo li = ReadLeader(tx, ml);
+                            if (li == null) continue;
+                            if (!string.IsNullOrEmpty(rq.Block) && !string.Equals(li.Name, rq.Block, StringComparison.OrdinalIgnoreCase)) continue;
+                            if (li.Values.Count == 0 && rq.AttributedOnly) continue;
+                            NoteOrder(order, li.Name, li.Order);
+                            List<object> attrs = new List<object>();
+                            foreach (KeyValuePair<string, string> kv in li.Values) attrs.Add(new object[] { kv.Key, kv.Value ?? "" });
+                            blocks.Add(Row("MLEADER", li.Name, ml.Layer, ml.Handle.ToString(), li.X, li.Y, sp.Key, attrs, li.Const.ToList()));
+                        }
                     }
                 tx.Commit();
             }
             return new Dictionary<string, object> { { "blocks", blocks }, { "tag_order", order } };
+        }
+
+        static void NoteOrder(Dictionary<string, List<string>> order, string name, List<string> ord)
+        {
+            List<string> o;
+            if (!order.TryGetValue(name, out o)) order[name] = o = new List<string>();
+            foreach (string t in ord) if (!o.Contains(t)) o.Add(t);
+        }
+
+        static Dictionary<string, object> Row(string type, string name, string layer, string handle, double x, double y, string space, List<object> attrs, List<string> constTags)
+        {
+            return new Dictionary<string, object>
+            {
+                { "type", type }, { "block", name }, { "layer", layer }, { "handle", handle },
+                { "x", Math.Round(x, 3) }, { "y", Math.Round(y, 3) }, { "space", space }, { "attrs", attrs }, { "const_tags", constTags }
+            };
         }
 
         static string ExportPath(Document doc)
@@ -153,7 +273,7 @@ namespace CadAiDesigner
         {
             Dictionary<string, object> body;
             using (doc.LockDocument()) body = Collect(doc.Database, rq);
-            if (((List<object>)body["blocks"]).Count == 0) return "Aktarılacak attribute bloğu bulunamadı" + (string.IsNullOrEmpty(rq.Block) ? "." : " ('" + rq.Block + "').");
+            if (((List<object>)body["blocks"]).Count == 0) return "Aktarılacak attribute bloğu veya multileader bulunamadı" + (string.IsNullOrEmpty(rq.Block) ? "." : " ('" + rq.Block + "').");
             body["export_path"] = ExportPath(doc);
             if (!string.IsNullOrEmpty(rq.GroupBy)) body["group_by"] = rq.GroupBy;
             ServiceHost.EnsureStarted(Settings.Load());
@@ -214,15 +334,21 @@ namespace CadAiDesigner
                     if (scope == "Tumbloklar") rq.AttributedOnly = false;
                     else if (scope == "Secim")
                     {
-                        PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nAktarılacak blokları seçin: " },
-                            new SelectionFilter(new[] { new TypedValue((int)DxfCode.Start, "INSERT") }));
+                        PromptSelectionResult sr = ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nAktarılacak blok veya multileader'ları seçin: " },
+                            new SelectionFilter(new[]
+                            {
+                                new TypedValue((int)DxfCode.Operator, "<OR"),
+                                new TypedValue((int)DxfCode.Start, "INSERT"),
+                                new TypedValue((int)DxfCode.Start, "MULTILEADER"),
+                                new TypedValue((int)DxfCode.Operator, "OR>")
+                            }));
                         if (sr.Status != PromptStatus.OK) return;
                         rq.Only = new HashSet<ObjectId>(sr.Value.GetObjectIds());
                     }
                     else if (scope == "Blok")
                     {
                         List<KeyValuePair<string, int>> names = AttExport.AttributedNames(doc.Database, rq.AllLayouts).ToList();
-                        if (names.Count == 0) { ed.WriteMessage("\nÇizimde attribute'lu blok yok.\n"); return; }
+                        if (names.Count == 0) { ed.WriteMessage("\nÇizimde attribute'lu blok veya multileader yok.\n"); return; }
                         for (int i = 0; i < names.Count; i++) ed.WriteMessage("\n  " + (i + 1) + ") " + names[i].Key + " (" + names[i].Value + ")");
                         PromptResult nr = ed.GetString(new PromptStringOptions("\nBlok adı veya numarası: ") { AllowSpaces = true });
                         if (nr.Status != PromptStatus.OK) return;

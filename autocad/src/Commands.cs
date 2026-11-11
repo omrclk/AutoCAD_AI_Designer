@@ -15,6 +15,8 @@ using AcadApp = Autodesk.AutoCAD.ApplicationServices.Application;
 [assembly: CommandClass(typeof(CadAiDesigner.FittingCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.AttExportCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.AttImportCommands))]
+[assembly: CommandClass(typeof(CadAiDesigner.MlBilgiCommands))]
+[assembly: CommandClass(typeof(CadAiDesigner.MlKopyaCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.ArmaturCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.AydHesapCommands))]
 [assembly: CommandClass(typeof(CadAiDesigner.OdaSayimCommands))]
