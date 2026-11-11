@@ -242,15 +242,25 @@ def _sheet_xml(rows):
         out.append('<row r="%d">' % r)
         for c, v in enumerate(row):
             ref = '%s%d' % (_col(c), r)
-            style = ' s="1"' if r == 1 else ''
             if v is None or v == '':
                 continue
             if isinstance(v, bool):
                 v = 'evet' if v else 'hayır'
+            # Newlines stay inside the cell (MTEXT). &#10; is the line break Excel keeps; wrap shows it.
+            nl = isinstance(v, str) and ('\n' in v or '\r' in v)
+            if r == 1 and nl:
+                style = ' s="3"'
+            elif r == 1:
+                style = ' s="1"'
+            elif nl:
+                style = ' s="2"'
+            else:
+                style = ''
             if isinstance(v, (int, float)):
                 out.append('<c r="%s"%s><v>%s</v></c>' % (ref, style, repr(float(v)) if isinstance(v, float) else v))
             else:
-                out.append('<c r="%s" t="inlineStr"%s><is><t xml:space="preserve">%s</t></is></c>' % (ref, style, escape(str(v))))
+                text = escape(str(v)).replace('\r\n', '&#10;').replace('\n', '&#10;').replace('\r', '&#10;')
+                out.append('<c r="%s" t="inlineStr"%s><is><t xml:space="preserve">%s</t></is></c>' % (ref, style, text))
         out.append('</row>')
     out.append('</sheetData></worksheet>')
     return ''.join(out)
@@ -265,7 +275,7 @@ def write_xlsx(path, sheets):
         '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
         'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' + ''.join('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (escape(n, {'"': '&quot;'}), i + 1, i + 1) for i, n in enumerate(names)) + '</sheets></workbook>',
         'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + ''.join('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet%d.xml"/>' % (i + 1, i + 1) for i in range(len(sheets))) + '<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' % (len(sheets) + 1),
-        'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf/><xf fontId="1" applyFont="1"/></cellXfs></styleSheet>',
+        'xl/styles.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="4"><xf/><xf fontId="1" applyFont="1"/><xf applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf fontId="1" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf></cellXfs></styleSheet>',
     }
     for i, (_, rows) in enumerate(sheets):
         files['xl/worksheets/sheet%d.xml' % (i + 1)] = _sheet_xml(rows)

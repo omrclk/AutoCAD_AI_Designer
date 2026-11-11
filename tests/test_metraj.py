@@ -68,6 +68,16 @@ class MetrajTests(unittest.TestCase):
             self.assertIn('Keşif', z.read('xl/workbook.xml').decode('utf-8'))
         self.assertEqual(m.read_xlsx_rows(p)[1], ['PRIZ & <x>', '5.5'])
         self.assertEqual(m.load_prices(p)[0]['birim_fiyat'], 5.5)
+        sheet = zipfile.ZipFile(p).read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('s="1"', sheet)
+
+    def test_xlsx_newline_stays_one_cell(self):
+        p = m.write_xlsx(os.path.join(self.d, 'nl.xlsx'), [('Metin', [['\u00fcst\nalt'], ['tek']])])
+        with zipfile.ZipFile(p) as z:
+            xml = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+        self.assertIn('&#10;', xml)
+        self.assertIn('wrapText="1"', zipfile.ZipFile(p).read('xl/styles.xml').decode('utf-8'))
+        self.assertEqual(m.read_xlsx_rows(p), [['\u00fcst\nalt'], ['tek']])
 
     def test_report_full(self):
         pp = os.path.join(self.d, 'fiyat', 'birim_fiyat.csv')
