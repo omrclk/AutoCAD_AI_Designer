@@ -224,73 +224,297 @@ namespace CadAiDesigner
         static int ApplyOne(Transaction tr, Entity ent, string where, ref int elevN, ref int thickN, ref int projN, ref int errN, ref string firstErr)
         {
             string before = ZInfo(ent);
+            string xy0 = XyTxt(ent);
+            List<Point2d> xyBefore = SampleXY(ent);
+            int elev0 = elevN, thick0 = thickN, proj0 = projN;
+            Transaction sub = null;
+            bool closed = false;
             try
             {
-                int kind = Flatten(tr, ent, ref elevN, ref thickN, ref projN);
-                if (kind == 2)
+                sub = ent.Database.TransactionManager.StartTransaction();
+                Entity live = sub.GetObject(ent.ObjectId, OpenMode.ForWrite) as Entity;
+                if (live == null)
                 {
-                    LogStep("skipped", where, ent.ObjectId, ent.GetType().Name + " " + before);
-                    return 2;
-                }
-                bool off, uniform;
-                double z;
-                bool known = TryMeasure(tr, ent, out z, out off, out uniform);
-                if (known && off && uniform && !(ent is Viewport))
-                {
-                    try
-                    {
-                        Write(ent);
-                        ent.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
-                        kind = 1;
-                        known = TryMeasure(tr, ent, out z, out off, out uniform);
-                    }
-                    catch (System.Exception ex)
-                    {
-                        if (!(ent is Leader))
-                        {
-                            NoteErr(ref errN, ref firstErr, ent, ex);
-                            LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " -> " + ZInfo(ent) + " displace " + ex.Message);
-                            return -1;
-                        }
-                    }
-                }
-                if (known && off)
-                {
-                    Leader ld = ent as Leader;
-                    if (ld != null && !ld.IsErased)
-                    {
-                        Leader neu = RebuildLeader(tr, ld);
-                        if (neu != null)
-                        {
-                            bool off2, uniform2;
-                            double z2;
-                            if (TryMeasure(tr, neu, out z2, out off2, out uniform2) && !off2)
-                            {
-                                LogStep("fixed", where, neu.ObjectId, "Leader " + before + " -> " + ZInfo(neu) + " rebuilt");
-                                return 1;
-                            }
-                            LogStep("failed", where, neu.ObjectId, "Leader " + before + " -> " + ZInfo(neu) + " still off");
-                            if (firstErr == null) firstErr = "Leader " + neu.Handle + " still off Z";
-                            errN++;
-                            return -1;
-                        }
-                    }
-                    LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " -> " + ZInfo(ent) + " still off z=" + Num(z));
-                    if (firstErr == null) firstErr = ent.GetType().Name + " " + ent.Handle + " still off Z";
+                    sub.Abort();
+                    closed = true;
+                    LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + xy0 + " open");
                     errN++;
                     return -1;
                 }
-                string after = ZInfo(ent);
-                string action = kind == 1 ? "fixed" : "unchanged";
-                LogStep(action, where, ent.ObjectId, ent.GetType().Name + " " + before + " -> " + after);
-                return kind == 1 ? 1 : 0;
+                bool changed = MirrorNegativeZ(live, sub, ref projN);
+                Leader mirrored = live as Leader;
+                if (mirrored != null)
+                {
+                    Vector3d ln;
+                    if (TryNormal(mirrored, out ln) && IsNearNegativeZ(ln))
+                    {
+                        Leader neu = RebuildLeader(sub, mirrored);
+                        if (neu != null)
+                        {
+                            live = neu;
+                            changed = true;
+                        }
+                    }
+                }
+                int kind = Flatten(sub, live, ref elevN, ref thickN, ref projN);
+                if (kind == 1) changed = true;
+                if (kind == 2)
+                {
+                    sub.Commit();
+                    closed = true;
+                    LogStep("skipped", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + xy0);
+                    return 2;
+                }
+                Entity check = live;
+                bool off, uniform;
+                double z;
+                bool known = TryMeasure(sub, live, out z, out off, out uniform);
+                if (known && off && uniform && !(live is Viewport))
+                {
+                    Write(live);
+                    live.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
+                    changed = true;
+                    known = TryMeasure(sub, live, out z, out off, out uniform);
+                }
+                if (known && off)
+                {
+                    Leader ld = live as Leader;
+                    if (ld != null && !ld.IsErased)
+                    {
+                        Leader neu = RebuildLeader(sub, ld);
+                        if (neu != null)
+                        {
+                            check = neu;
+                            changed = true;
+                            known = TryMeasure(sub, neu, out z, out off, out uniform);
+                        }
+                    }
+                }
+                string xy1 = XyTxt(check);
+                if (XyMoved(xyBefore, SampleXY(check)))
+                {
+                    sub.Abort();
+                    closed = true;
+                    elevN = elev0;
+                    thickN = thick0;
+                    projN = proj0;
+                    LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + xy0 + " -> " + xy1 + " xy-shift");
+                    if (firstErr == null) firstErr = ent.GetType().Name + " " + ent.Handle + " xy-shift";
+                    errN++;
+                    return -1;
+                }
+                string after = ZInfo(check);
+                sub.Commit();
+                closed = true;
+                if (known && off)
+                {
+                    LogStep("failed", where, check.ObjectId, check.GetType().Name + " " + before + " " + xy0 + " -> " + after + " " + xy1 + " still off z=" + Num(z));
+                    if (firstErr == null) firstErr = check.GetType().Name + " " + check.Handle + " still off Z";
+                    errN++;
+                    return -1;
+                }
+                string action = changed ? "fixed" : "unchanged";
+                LogStep(action, where, check.ObjectId, check.GetType().Name + " " + before + " " + xy0 + " -> " + after + " " + xy1);
+                return changed ? 1 : 0;
             }
             catch (System.Exception ex)
             {
+                if (sub != null && !closed)
+                {
+                    try { sub.Abort(); } catch (System.Exception) { }
+                    elevN = elev0;
+                    thickN = thick0;
+                    projN = proj0;
+                }
                 NoteErr(ref errN, ref firstErr, ent, ex);
-                LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + ex.Message);
+                LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + xy0 + " " + ex.Message);
                 return -1;
             }
+            finally
+            {
+                if (sub != null) sub.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Normal -Z is flipped by a mirror through the horizontal plane at z/2.
+        /// That sends z to 0, turns the normal to +Z, and leaves WCS XY untouched.
+        /// A rotation would mirror the plan.
+        /// </summary>
+        static bool MirrorNegativeZ(Entity ent, Transaction tr, ref int projN)
+        {
+            if (ent is Viewport) return false;
+            Vector3d n;
+            if (!TryNormal(ent, out n) || !IsNearNegativeZ(n)) return false;
+            bool off, uniform;
+            double z;
+            if (!TryMeasure(tr, ent, out z, out off, out uniform) || !uniform) return false;
+            Write(ent);
+            double c = z * 0.5;
+            ent.TransformBy(Matrix3d.Mirroring(new Plane(new Point3d(0.0, 0.0, c), Vector3d.ZAxis)));
+            ClearTextMirror(ent);
+            projN++;
+            return true;
+        }
+
+        static void ClearTextMirror(Entity ent)
+        {
+            DBText tx = ent as DBText;
+            if (tx == null) return;
+            try
+            {
+                if (tx.IsMirroredInX) tx.IsMirroredInX = false;
+            }
+            catch (System.Exception) { }
+            try
+            {
+                if (tx.IsMirroredInY) tx.IsMirroredInY = false;
+            }
+            catch (System.Exception) { }
+        }
+
+        static List<Point2d> SampleXY(Entity ent)
+        {
+            List<Point2d> pts = new List<Point2d>();
+            if (ent == null || ent.IsErased) return pts;
+            try
+            {
+                Leader ld = ent as Leader;
+                if (ld != null)
+                {
+                    int n = ld.NumVertices;
+                    for (int i = 0; i < n && i < 64; i++)
+                    {
+                        Point3d p = ld.VertexAt(i);
+                        pts.Add(new Point2d(p.X, p.Y));
+                    }
+                    return pts;
+                }
+                Line ln = ent as Line;
+                if (ln != null)
+                {
+                    pts.Add(new Point2d(ln.StartPoint.X, ln.StartPoint.Y));
+                    pts.Add(new Point2d(ln.EndPoint.X, ln.EndPoint.Y));
+                    return pts;
+                }
+                Polyline pl = ent as Polyline;
+                if (pl != null)
+                {
+                    int n = pl.NumberOfVertices;
+                    for (int i = 0; i < n && i < 64; i++)
+                    {
+                        Point3d p = pl.GetPoint3dAt(i);
+                        pts.Add(new Point2d(p.X, p.Y));
+                    }
+                    return pts;
+                }
+                Arc arc = ent as Arc;
+                if (arc != null)
+                {
+                    pts.Add(new Point2d(arc.Center.X, arc.Center.Y));
+                    pts.Add(new Point2d(arc.StartPoint.X, arc.StartPoint.Y));
+                    pts.Add(new Point2d(arc.EndPoint.X, arc.EndPoint.Y));
+                    return pts;
+                }
+                Circle c = ent as Circle;
+                if (c != null)
+                {
+                    pts.Add(new Point2d(c.Center.X, c.Center.Y));
+                    return pts;
+                }
+                Ellipse el = ent as Ellipse;
+                if (el != null)
+                {
+                    pts.Add(new Point2d(el.Center.X, el.Center.Y));
+                    return pts;
+                }
+                DBText tx = ent as DBText;
+                if (tx != null)
+                {
+                    pts.Add(new Point2d(tx.Position.X, tx.Position.Y));
+                    try
+                    {
+                        if (tx.HorizontalMode != TextHorizontalMode.TextLeft || tx.VerticalMode != TextVerticalMode.TextBase)
+                            pts.Add(new Point2d(tx.AlignmentPoint.X, tx.AlignmentPoint.Y));
+                    }
+                    catch (System.Exception) { }
+                    return pts;
+                }
+                MText mt = ent as MText;
+                if (mt != null)
+                {
+                    pts.Add(new Point2d(mt.Location.X, mt.Location.Y));
+                    return pts;
+                }
+                BlockReference br = ent as BlockReference;
+                if (br != null)
+                {
+                    pts.Add(new Point2d(br.Position.X, br.Position.Y));
+                    return pts;
+                }
+                MLeader ml = ent as MLeader;
+                if (ml != null)
+                {
+                    try
+                    {
+                        ArrayList leaders = ml.GetLeaderIndexes();
+                        foreach (int li in Ints(leaders))
+                        {
+                            ArrayList lines = ml.GetLeaderLineIndexes(li);
+                            foreach (int line in Ints(lines))
+                            {
+                                if (ml.VerticesCount(line) <= 0) continue;
+                                Point3d p = ml.GetVertex(line, 0);
+                                pts.Add(new Point2d(p.X, p.Y));
+                                if (pts.Count >= 8) break;
+                            }
+                            if (pts.Count >= 8) break;
+                        }
+                    }
+                    catch (System.Exception) { }
+                    try
+                    {
+                        Point3d t = ml.TextLocation;
+                        pts.Add(new Point2d(t.X, t.Y));
+                    }
+                    catch (System.Exception) { }
+                    return pts;
+                }
+                foreach (PropertyInfo pi in ent.GetType().GetProperties(BindingFlags.Instance | BindingFlags.Public))
+                {
+                    if (pts.Count >= 8) break;
+                    if (pi.PropertyType != typeof(Point3d) || !pi.CanRead) continue;
+                    if (pi.GetIndexParameters().Length != 0) continue;
+                    if (pi.Name == "ViewTarget" || pi.Name == "Target" || pi.Name.IndexOf("View", StringComparison.Ordinal) >= 0) continue;
+                    try
+                    {
+                        Point3d p = (Point3d)pi.GetValue(ent, null);
+                        pts.Add(new Point2d(p.X, p.Y));
+                    }
+                    catch (System.Exception) { }
+                }
+            }
+            catch (System.Exception) { }
+            return pts;
+        }
+
+        static string XyTxt(Entity ent)
+        {
+            List<Point2d> pts = SampleXY(ent);
+            if (pts.Count == 0) return "xy=?";
+            return "xy=" + Num(pts[0].X) + "," + Num(pts[0].Y);
+        }
+
+        static bool XyMoved(List<Point2d> before, List<Point2d> after)
+        {
+            if (before == null || after == null || before.Count == 0 || after.Count == 0) return false;
+            int n = before.Count < after.Count ? before.Count : after.Count;
+            for (int i = 0; i < n; i++)
+            {
+                if (Math.Abs(before[i].X - after[i].X) > 1e-6) return true;
+                if (Math.Abs(before[i].Y - after[i].Y) > 1e-6) return true;
+            }
+            return false;
         }
 
         static string ZInfo(Entity ent)
@@ -582,69 +806,70 @@ namespace CadAiDesigner
         /// </summary>
         static int FlattenLw(Polyline pl, ref int elevN, ref int thickN, ref int projN)
         {
-            // Elevation is what the Properties palette shows. Write it before any vertex or width call that might throw.
+            // Read WCS first. Setting Normal before that reinterprets OCS and moves the plan.
             double elev = 0;
             try { elev = pl.Elevation; } catch (System.Exception) { }
-            bool hadElev = Math.Abs(elev) > 1e-9;
             Vector3d n = Vector3d.ZAxis;
             try { n = pl.Normal; } catch (System.Exception) { }
-            bool project = !IsExactPositiveZ(n);
-            if (hadElev || project)
-            {
-                Write(pl);
-                try { pl.Normal = Vector3d.ZAxis; } catch (System.Exception) { }
-                pl.Elevation = 0.0;
-                if (hadElev) elevN++;
-                if (project) projN++;
-            }
             int nv = 0;
             try { nv = pl.NumberOfVertices; } catch (System.Exception) { nv = 0; }
-            bool negateBulge = n.Z < 0;
-            bool movedPt = false;
+            Point2d[] xy = new Point2d[nv];
+            double[] bulge = new double[nv];
+            double[] sw = new double[nv];
+            double[] ew = new double[nv];
+            bool negateBulge = n.Z < 0 && !IsNearNegativeZ(n);
             for (int i = 0; i < nv; i++)
             {
                 try
                 {
                     Point3d w = pl.GetPoint3dAt(i);
+                    xy[i] = new Point2d(w.X, w.Y);
                     double b = pl.GetBulgeAt(i);
-                    if (negateBulge) b = -b;
-                    if (Math.Abs(w.Z) > Tol || project || negateBulge)
-                    {
-                        Write(pl);
-                        pl.SetPointAt(i, new Point2d(w.X, w.Y));
-                        pl.SetBulgeAt(i, b);
-                        movedPt = true;
-                    }
+                    bulge[i] = negateBulge ? -b : b;
+                    sw[i] = pl.GetStartWidthAt(i);
+                    ew[i] = pl.GetEndWidthAt(i);
                 }
                 catch (System.Exception) { }
-                try
+            }
+            bool hadElev = Math.Abs(elev) > 1e-9;
+            bool project = !IsExactPositiveZ(n) && !IsNearPositiveZ(n);
+            bool hadThick = false;
+            try { hadThick = Math.Abs(pl.Thickness) > Tol; } catch (System.Exception) { }
+            if (!hadElev && !project && !hadThick && !negateBulge) return 0;
+            Write(pl);
+            // A -Z normal was already mirrored to +Z when every vertex shared one Z.
+            // Here only a tilted normal is rewritten, using the WCS XY captured above.
+            if (project && !IsNearNegativeZ(n))
+            {
+                try { pl.Normal = Vector3d.ZAxis; } catch (System.Exception) { }
+                projN++;
+                for (int i = 0; i < nv; i++)
                 {
-                    double sw = pl.GetStartWidthAt(i);
-                    double ew = pl.GetEndWidthAt(i);
-                    Write(pl);
-                    pl.SetStartWidthAt(i, sw);
-                    pl.SetEndWidthAt(i, ew);
+                    try
+                    {
+                        pl.SetPointAt(i, xy[i]);
+                        pl.SetBulgeAt(i, bulge[i]);
+                        pl.SetStartWidthAt(i, sw[i]);
+                        pl.SetEndWidthAt(i, ew[i]);
+                    }
+                    catch (System.Exception) { }
                 }
-                catch (System.Exception) { }
             }
             try
             {
                 if (Math.Abs(pl.Elevation) > 1e-9)
                 {
-                    Write(pl);
                     pl.Elevation = 0.0;
-                    if (!hadElev) elevN++;
+                    elevN++;
                     hadElev = true;
                 }
             }
             catch (System.Exception) { }
-            bool hadThick = false;
-            try { hadThick = Math.Abs(pl.Thickness) > Tol; } catch (System.Exception) { }
             if (hadThick)
             {
-                try { Write(pl); pl.Thickness = 0.0; thickN++; } catch (System.Exception) { }
+                try { pl.Thickness = 0.0; thickN++; } catch (System.Exception) { }
             }
-            return (hadElev || project || movedPt || hadThick) ? 1 : 0;
+            return 1;
         }
 
         static int FlattenP2(Transaction tr, Polyline2d pl, ref int elevN, ref int thickN, ref int projN)
@@ -725,11 +950,19 @@ namespace CadAiDesigner
             Point3d s = arc.StartPoint;
             Point3d e = arc.EndPoint;
             double rad = arc.Radius;
+            bool hadThick = Math.Abs(arc.Thickness) > Tol;
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(c.Z) <= Tol && !hadThick) return 0;
+                Write(arc);
+                arc.Center = new Point3d(c.X, c.Y, 0);
+                if (hadThick) { arc.Thickness = 0.0; thickN++; }
+                return 1;
+            }
             double a0 = Math.Atan2(s.Y - c.Y, s.X - c.X);
             double a1 = Math.Atan2(e.Y - c.Y, e.X - c.X);
             // Negative normal: CCW around -Z is CW in plan. Swap so the bulge side stays.
             if (n.Z < 0) { double tmp = a0; a0 = a1; a1 = tmp; }
-            bool hadThick = Math.Abs(arc.Thickness) > Tol;
             if (!project && Math.Abs(c.Z) <= Tol && !hadThick) return 0;
             Write(arc);
             if (project) { arc.Normal = Vector3d.ZAxis; projN++; }
@@ -749,6 +982,14 @@ namespace CadAiDesigner
             Point3d cen = c.Center;
             double rad = c.Radius;
             bool hadThick = Math.Abs(c.Thickness) > Tol;
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(cen.Z) <= Tol && !hadThick) return 0;
+                Write(c);
+                c.Center = new Point3d(cen.X, cen.Y, 0);
+                if (hadThick) { c.Thickness = 0.0; thickN++; }
+                return 1;
+            }
             if (!project && Math.Abs(cen.Z) <= Tol && !hadThick) return 0;
             Write(c);
             if (project) { c.Normal = Vector3d.ZAxis; projN++; }
@@ -764,6 +1005,13 @@ namespace CadAiDesigner
             Vector3d n = el.Normal;
             bool project = !IsExactPositiveZ(n);
             Point3d c = el.Center;
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(c.Z) <= Tol) return 0;
+                Write(el);
+                el.Set(new Point3d(c.X, c.Y, 0), n, el.MajorAxis, el.RadiusRatio, el.StartAngle, el.EndAngle);
+                return 1;
+            }
             Vector3d maj = el.MajorAxis;
             double ratio = el.RadiusRatio;
             double sa = el.StartAngle, ea = el.EndAngle;
@@ -845,6 +1093,14 @@ namespace CadAiDesigner
         static int FlattenDbPoint(DBPoint pt, ref int elevN, ref int thickN, ref int projN)
         {
             bool project = !IsExactPositiveZ(pt.Normal);
+            if (IsNearNegativeZ(pt.Normal))
+            {
+                if (Math.Abs(pt.Position.Z) <= Tol && Math.Abs(pt.Thickness) <= Tol) return 0;
+                Write(pt);
+                pt.Position = Flat(pt.Position);
+                if (ApplyThick(pt, ref thickN)) { }
+                return 1;
+            }
             bool changed = Math.Abs(pt.Position.Z) > Tol || project;
             if (!changed && Math.Abs(pt.Thickness) <= Tol) return 0;
             Write(pt);
@@ -871,6 +1127,15 @@ namespace CadAiDesigner
                 alignZ = Math.Abs(a.Z) > Tol;
             }
             bool hadThick = Math.Abs(t.Thickness) > Tol;
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(p.Z) <= Tol && !alignZ && !hadThick) return 0;
+                Write(t);
+                t.Position = Flat(p);
+                if (aligned) t.AlignmentPoint = Flat(a);
+                if (hadThick) { t.Thickness = 0.0; thickN++; }
+                return 1;
+            }
             if (!project && Math.Abs(p.Z) <= Tol && !alignZ && !hadThick && AngClose(rot, newRot)) return 0;
             Write(t);
             if (project) { t.Normal = Vector3d.ZAxis; projN++; }
@@ -889,6 +1154,14 @@ namespace CadAiDesigner
             Point3d loc = mt.Location;
             Vector3d dir = mt.Direction;
             Vector3d flatDir = new Vector3d(dir.X, dir.Y, 0);
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(loc.Z) <= Tol && Math.Abs(dir.Z) <= Tol) return 0;
+                Write(mt);
+                mt.Location = Flat(loc);
+                if (flatDir.Length > Tol) mt.Direction = flatDir.GetNormal();
+                return 1;
+            }
             if (!project && Math.Abs(loc.Z) <= Tol && Math.Abs(dir.Z) <= Tol) return 0;
             Write(mt);
             if (project) { mt.Normal = Vector3d.ZAxis; projN++; }
@@ -907,6 +1180,13 @@ namespace CadAiDesigner
             Point3d p = br.Position;
             double rot = br.Rotation;
             double newRot = PlanAngle(n, rot);
+            if (IsNearNegativeZ(n))
+            {
+                if (Math.Abs(p.Z) <= Tol) return 0;
+                Write(br);
+                br.Position = Flat(p);
+                return 1;
+            }
             if (!project && Math.Abs(p.Z) <= Tol && AngClose(rot, newRot)) return 0;
             Write(br);
             if (project) { br.Normal = Vector3d.ZAxis; projN++; }
@@ -992,7 +1272,8 @@ namespace CadAiDesigner
             catch (System.Exception) { }
             try
             {
-                if (!IsExactPositiveZ(ml.Normal))
+                Vector3d nrm = ml.Normal;
+                if (!IsExactPositiveZ(nrm) && !IsNearPositiveZ(nrm) && !IsNearNegativeZ(nrm))
                 {
                     Write(ml);
                     ml.TransformBy(Matrix3d.Projection(new Plane(Point3d.Origin, Vector3d.ZAxis), Vector3d.ZAxis));
@@ -1057,42 +1338,27 @@ namespace CadAiDesigner
 
         static int FlattenLeader(Leader ld, ref int elevN, ref int thickN, ref int projN)
         {
-            // Vertices are constrained to the leader plane. SetVertexAt(Z=0) is projected
-            // back onto that plane, so an elevated +Z leader never moves. Shift the plane.
+            // Never rotate a leader. A 180° turn about the first vertex mirrors WCS XY.
+            // Normal -Z is mirrored about a horizontal plane before this runs.
+            // A +Z leader is only shifted in Z. A tilted one is rebuilt from (x, y, 0).
             double zMin, zMax;
             if (!LeaderRange(ld, out zMin, out zMax)) return 0;
             Vector3d n = LeaderNormal(ld);
             bool elevated = Math.Abs(zMin) > Tol || Math.Abs(zMax) > Tol;
-            if (!elevated && IsNearPositiveZ(n)) return 0;
-            Write(ld);
-            try
+            if (!elevated && (IsNearPositiveZ(n) || IsNearNegativeZ(n))) return 0;
+            if (IsNearNegativeZ(n)) return 0;
+            bool uniform = Math.Abs(zMax - zMin) <= 1e-6;
+            if (uniform && elevated)
             {
-                bool uniform = Math.Abs(zMax - zMin) <= 1e-6;
-                if (uniform && elevated)
-                {
-                    double z = ld.VertexAt(0).Z;
-                    if (Math.Abs(z) > Tol)
-                        ld.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
-                }
-                if (!IsNearPositiveZ(LeaderNormal(ld)))
-                {
-                    AimLeaderUp(ld, ld.VertexAt(0));
-                    projN++;
-                    double z2 = ld.VertexAt(0).Z;
-                    if (Math.Abs(z2) > Tol)
-                        ld.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z2)));
-                }
-                else if (!LeaderFlat(ld))
-                {
-                    double z2 = ld.VertexAt(0).Z;
-                    if (Math.Abs(z2) > Tol)
-                        ld.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z2)));
-                }
+                Write(ld);
+                double z = ld.VertexAt(0).Z;
+                if (Math.Abs(z) > Tol)
+                    ld.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
+                if (ApplyElev(ld, ref elevN)) { }
+                if (ApplyThick(ld, ref thickN)) { }
+                return 1;
             }
-            catch (System.Exception) { }
-            if (ApplyElev(ld, ref elevN)) { }
-            if (ApplyThick(ld, ref thickN)) { }
-            return 1;
+            return elevated ? 1 : 0;
         }
 
         static Vector3d LeaderNormal(Leader ld)
@@ -1128,23 +1394,6 @@ namespace CadAiDesigner
             double a, b;
             if (!LeaderRange(ld, out a, out b)) return false;
             return Math.Abs(a) <= ReportZ && Math.Abs(b) <= ReportZ;
-        }
-
-        static void AimLeaderUp(Leader ld, Point3d pivot)
-        {
-            Vector3d n = LeaderNormal(ld);
-            double len = n.Length;
-            if (len <= Tol) return;
-            n = n / len;
-            if (IsNearPositiveZ(n)) return;
-            Vector3d axis = n.CrossProduct(Vector3d.ZAxis);
-            if (axis.Length > 1e-9)
-            {
-                double ang = n.GetAngleTo(Vector3d.ZAxis);
-                ld.TransformBy(Matrix3d.Rotation(ang, axis, pivot));
-            }
-            else if (n.Z < 0)
-                ld.TransformBy(Matrix3d.Rotation(Math.PI, Vector3d.XAxis, pivot));
         }
 
         /// <summary>
@@ -1227,6 +1476,14 @@ namespace CadAiDesigner
             bool project = !IsExactPositiveZ(n);
             double elev = dim.Elevation;
             bool hadElev = Math.Abs(elev) > Tol;
+            if (IsNearNegativeZ(n))
+            {
+                if (!hadElev) return 0;
+                Write(dim);
+                dim.Elevation = 0.0;
+                elevN++;
+                return 1;
+            }
             bool skipText = false;
             try { skipText = dim.UsingDefaultTextPosition; } catch (System.Exception) { }
             Matrix3d toWcs = Matrix3d.PlaneToWorld(n);
@@ -1273,6 +1530,14 @@ namespace CadAiDesigner
             bool project = !IsExactPositiveZ(n);
             double elev = h.Elevation;
             bool hadElev = Math.Abs(elev) > Tol;
+            if (IsNearNegativeZ(n))
+            {
+                if (!hadElev) return 0;
+                Write(h);
+                h.Elevation = 0.0;
+                elevN++;
+                return 1;
+            }
             if (!project && !hadElev) return 0;
             bool assoc = false;
             try { assoc = h.Associative; } catch (System.Exception) { }
@@ -1908,6 +2173,15 @@ namespace CadAiDesigner
                 return true;
             }
             catch (System.Exception) { return false; }
+        }
+
+        /// <summary>True for a normal within about 0.006 degrees of -Z.</summary>
+        static bool IsNearNegativeZ(Vector3d n)
+        {
+            double len = n.Length;
+            if (len <= Tol) return false;
+            double x = n.X / len, y = n.Y / len, z = n.Z / len;
+            return Math.Abs(x) <= 1e-4 && Math.Abs(y) <= 1e-4 && z < 0;
         }
 
         /// <summary>True for a normal within about 0.006 degrees of +Z.</summary>

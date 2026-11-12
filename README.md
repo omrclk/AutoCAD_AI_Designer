@@ -207,10 +207,10 @@ Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (
 
 Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
 
-Geçerli alan, Model ve bütün paftalar tek işlemde WCS Z=0 yapılır. Bu alanlardaki blokların tanımları da (iç içe bloklar ve dinamik bloğun *U kopyaları) düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). Xref tanımlarına girilmez. LW polyline Elevation her zaman 0 yazılır. Eski Leader (oklu çizgi) kendi düzleminde kaldığı için köşe Z'si yazılmaz; bütün lider `TransformBy` ile Z=0 düzlemine taşınır. Multileader köşe ve yazı Z'si 0 yapılır. Blok referansının ekleme Z değeri ve attribute'ları da sıfırlanır. XCLIP sınırına dokunulmaz.
+Geçerli alan, Model ve bütün paftalar tek işlemde WCS Z=0 yapılır. Bu alanlardaki blokların tanımları da (iç içe bloklar ve dinamik bloğun *U kopyaları) düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). Xref tanımlarına girilmez. LW polyline Elevation her zaman 0 yazılır. Eski Leader normali `-Z` ise yatay düzlemde aynalanır: plan XY durur, normal `+Z` olur. Döndürme yapılmaz. İşlemden sonra bir noktanın XY'si 1e-6'dan fazla kayarsa o nesne geri alınır. Blok referansının ekleme Z değeri ve attribute'ları da sıfırlanır. XCLIP sınırına dokunulmaz.
 
 - Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
-- LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali `-Z` olanlarda bulge ters çevrilir, plan değişmez. Z eksenine çok yakın normaller `+Z` yapılır.
+- LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali tam `-Z` olan polyline yatay aynayla çevrilir, plan XY değişmez.
 - Yay, çember, elips, yazı, blok, ölçü, tarama ve multileader: normal `+Z`, WCS XY korunur. Eğik olanlar da atlanmaz.
 - Kilitli katmanlar işlem sırasında açılır, bitince yeniden kilitlenir. Özet, kilitli katmandaki adedi ve normali düzlenen adedi yazar. İlk hata komut satırına basılır.
 - Çizimin `ELEVATION` sistem değişkeni 0 yapılır. UCS Dünya değilse özet, UCS orijininin Z değerini yazar (UCS değiştirilmez).
