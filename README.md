@@ -209,10 +209,9 @@ Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`
 
 Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Blok tanımlarına girilmez; yalnız blok referansının ekleme Z değeri değişir.
 
-- Çizgi, spline ve 3B polyline: nokta Z=0. Düşey çizgi atlanır.
-- Yay, çember, elips, LW polyline, yazı, blok, ölçü, tarama ve multileader: normali Z eksenine paralelse düzeltilir; eğik düzlem atlanır.
-- Polyline, Hatch, Polyline2d, ölçü ve `Elevation` özelliği olan nesnelerde Elevation=0. `Thickness` özelliği 0 yapılır.
-- Işın ve xline: taban Z=0, yön XY düzlemine izdüşürülür; düşey olanlar atlanır.
-- Kilitli katmandaki nesneler atlanır.
+- Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
+- LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali `-Z` olanlarda bulge ters çevrilir, plan değişmez. Z eksenine çok yakın normaller `+Z` yapılır.
+- Yay, çember, elips, yazı, blok, ölçü, tarama ve multileader: normal `+Z`, WCS XY korunur. Eğik olanlar da atlanmaz.
+- Kilitli katmanlar işlem sırasında açılır, bitince yeniden kilitlenir. Özet, kilitli katmandaki adedi ve normali düzlenen adedi yazar. İlk hata komut satırına basılır.
 - Çizimin `ELEVATION` sistem değişkeni 0 yapılır. UCS Dünya değilse özet, UCS orijininin Z değerini yazar (UCS değiştirilmez).
-- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, atlanan (3B/eğik normal), kilitli katman. Tek UNDO.
+- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, normali düzlenen, atlanan düşey, kilitli katman. Tek UNDO.
