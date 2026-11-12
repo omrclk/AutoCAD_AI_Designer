@@ -7,7 +7,6 @@ using System.Reflection;
 using System.Text;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
-using Autodesk.AutoCAD.DatabaseServices.Filters;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
@@ -19,16 +18,12 @@ namespace CadAiDesigner
     /// (Model, or the active layout's paper space), the way FLATTEN does.
     /// Normals within 0.001 rad of ±Z are snapped to +Z; other planar objects are
     /// projected. Referenced block definitions (nested and dynamic *U) are flattened
-    /// too, and each definition's Origin Z is set to 0. XCLIP frames are dropped onto Z=0.
-    /// Xrefs are not opened. One transaction, one UNDO.
+    /// too, and each definition's Origin Z is set to 0. Xrefs are not opened. One transaction, one UNDO.
     /// </summary>
     public class ZSifirlaCommands
     {
         const double Tol = 1e-8;
         const double ReportZ = 1e-6;
-        const double XclipElevTol = 1e-9;
-        static int XclipFixed, XclipErr;
-        static bool DoXclip;
         static StreamWriter ZLog;
 
         [CommandMethod("ZSIFIRLA", CommandFlags.Modal | CommandFlags.NoBlockEditor | CommandFlags.Redraw)]
@@ -39,15 +34,10 @@ namespace CadAiDesigner
             if (doc == null) return;
             Editor ed = doc.Editor;
             Database db = doc.Database;
-            bool? xclipAsk = AskXclip(ed);
-            if (xclipAsk == null) return;
-            DoXclip = xclipAsk.Value;
-            XclipFixed = 0;
-            XclipErr = 0;
             OpenZLog();
             try
             {
-            LogStep("basla", DoXclip ? "xclip=evet" : "xclip=hayir", ObjectId.Null, "ZSIFIRLA");
+            LogStep("basla", "", ObjectId.Null, "ZSIFIRLA");
             int fixedN = 0, elevN = 0, thickN = 0, projN = 0, skipN = 0, lockedN = 0, errN = 0, total = 0;
             int blocksN = 0, blockFixed = 0, blockVisited = 0;
             string firstErr = null;
@@ -161,10 +151,8 @@ namespace CadAiDesigner
                 + "Blok tanımı: " + blocksN + ". "
                 + "Blok içi taranan: " + blockVisited + ". "
                 + "Blok içi düzeltilen: " + blockFixed + ". "
-                + "XCLIP sınırı düzeltilen: " + XclipFixed + ". "
                 + "Taranan: " + total + ".";
             if (errN > 0) msg += " Hata: " + errN + ".";
-            if (XclipErr > 0) msg += " XCLIP hata: " + XclipErr + ".";
             ed.WriteMessage(msg);
             if (firstErr != null) ed.WriteMessage("\nİlk hata: " + firstErr);
             if (!string.IsNullOrEmpty(leftover)) ed.WriteMessage("\n" + leftover);
@@ -181,18 +169,6 @@ namespace CadAiDesigner
             LogStep("bitti", spaceLabel, ObjectId.Null, "ZSIFIRLA");
             }
             finally { CloseZLog(); }
-        }
-
-        static bool? AskXclip(Editor ed)
-        {
-            PromptKeywordOptions ko = new PromptKeywordOptions("\nXCLIP sınırları da düzeltilsin mi [Evet/Hayır] <Evet>: ");
-            ko.AllowNone = true;
-            ko.Keywords.Add("Evet");
-            ko.Keywords.Add("Hayir");
-            PromptResult r = ed.GetKeywords(ko);
-            if (r.Status == PromptStatus.Cancel) return null;
-            if (r.Status == PromptStatus.OK && string.Equals(r.StringResult, "Hayir", StringComparison.OrdinalIgnoreCase)) return false;
-            return true;
         }
 
         static void OpenZLog()
@@ -446,7 +422,7 @@ namespace CadAiDesigner
             if (ent is Leader) return FlattenLeader((Leader)ent, ref elevN, ref thickN, ref projN);
             if (ent is Dimension) return FlattenDim((Dimension)ent, ref elevN, ref thickN, ref projN);
             if (ent is Hatch) return FlattenHatch((Hatch)ent, ref elevN, ref thickN, ref projN);
-            if (ent is BlockReference) return FlattenBlock(tr, (BlockReference)ent, ref elevN, ref thickN, ref projN);
+            if (ent is BlockReference) return FlattenBlock((BlockReference)ent, ref elevN, ref thickN, ref projN);
             if (ent is Face) return FlattenFace((Face)ent);
             if (ent is Solid) return FlattenSolid((Solid)ent, ref thickN, ref projN);
             if (ent is Trace) return FlattenTrace((Trace)ent, ref thickN, ref projN);
@@ -781,7 +757,7 @@ namespace CadAiDesigner
             return 1;
         }
 
-        static int FlattenBlock(Transaction tr, BlockReference br, ref int elevN, ref int thickN, ref int projN)
+        static int FlattenBlock(BlockReference br, ref int elevN, ref int thickN, ref int projN)
         {
             // Insertion Z in this owner (model space or a parent block). Definition Origin is handled separately.
             Vector3d n = br.Normal;
@@ -789,19 +765,13 @@ namespace CadAiDesigner
             Point3d p = br.Position;
             double rot = br.Rotation;
             double newRot = PlanAngle(n, rot);
-            bool move = project || Math.Abs(p.Z) > Tol || !AngClose(rot, newRot);
-            if (move)
-            {
-                Write(br);
-                if (project) { br.Normal = Vector3d.ZAxis; projN++; }
-                br.Position = Flat(p);
-                if (!AngClose(rot, newRot)) br.Rotation = newRot;
-                if (ApplyElev(br, ref elevN)) { }
-                if (ApplyThick(br, ref thickN)) { }
-            }
-            bool clip = FlattenXclip(tr, br);
-            if (clip) XclipFixed++;
-            if (!move && !clip) return 0;
+            if (!project && Math.Abs(p.Z) <= Tol && AngClose(rot, newRot)) return 0;
+            Write(br);
+            if (project) { br.Normal = Vector3d.ZAxis; projN++; }
+            br.Position = Flat(p);
+            if (!AngClose(rot, newRot)) br.Rotation = newRot;
+            if (ApplyElev(br, ref elevN)) { }
+            if (ApplyThick(br, ref thickN)) { }
             return 1;
         }
 
@@ -1085,8 +1055,6 @@ namespace CadAiDesigner
                     BlockReference br = ent as BlockReference;
                     if (br != null)
                     {
-                        string clip = XclipLine(tr, br, path);
-                        if (clip != null) AddSample(ref count, samples, clip);
                         BlockTableRecord def = null;
                         try { def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord; }
                         catch (System.Exception) { def = null; }
@@ -1130,30 +1098,6 @@ namespace CadAiDesigner
             catch (System.Exception) { return "?"; }
         }
 
-        /// <summary>XCLIP frame still off Z=0. Reads only the definition, never the clip matrices or extents.</summary>
-        static string XclipLine(Transaction tr, BlockReference br, string path)
-        {
-            try
-            {
-                SpatialFilter sf = OpenSpatial(tr, br, false);
-                if (sf == null) return null;
-                SpatialFilterDefinition def = sf.Definition;
-                Point2dCollection pts = null;
-                try { pts = def.GetPoints(); } catch (System.Exception) { pts = null; }
-                if (pts == null || pts.Count < 2) return null;
-                if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= XclipElevTol) return null;
-                string name = path;
-                try
-                {
-                    BlockTableRecord defb = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                    if (defb != null) name = path + " > " + SafeName(defb);
-                }
-                catch (System.Exception) { }
-                return "XCLIP " + name + ", katman " + br.Layer + ", elev " + Fmt(def.Elevation);
-            }
-            catch (System.Exception) { return null; }
-        }
-
         static bool EntityZ(Entity ent, out double z0, out double z1)
         {
             z0 = 0;
@@ -1185,70 +1129,6 @@ namespace CadAiDesigner
             }
             catch (System.Exception) { return false; }
             return false;
-        }
-
-        static bool FlattenXclip(Transaction tr, BlockReference br)
-        {
-            if (!DoXclip || br == null) return false;
-            LogStep("xclip", "", br.ObjectId, "INSERT");
-            Database db = null;
-            try { db = br.Database; } catch (System.Exception) { return false; }
-            if (db == null) return false;
-            using (Transaction sub = db.TransactionManager.StartTransaction())
-            {
-                try
-                {
-                    BlockReference cur = (BlockReference)sub.GetObject(br.ObjectId, OpenMode.ForRead);
-                    if (IsXrefRef(sub, cur)) { sub.Commit(); return false; }
-                    SpatialFilter sf = OpenSpatial(sub, cur, false);
-                    if (sf == null) { sub.Commit(); return false; }
-                    SpatialFilterDefinition def = sf.Definition;
-                    Point2dCollection src = def.GetPoints();
-                    if (src == null || src.Count < 2) { sub.Commit(); return false; }
-                    if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= XclipElevTol) { sub.Commit(); return false; }
-                    Point2dCollection pts = new Point2dCollection();
-                    foreach (Point2d p in src) pts.Add(new Point2d(p.X, p.Y));
-                    double front = def.FrontClip;
-                    double back = def.BackClip;
-                    bool enabled = def.Enabled;
-                    if (!sf.IsWriteEnabled) sf.UpgradeOpen();
-                    sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, front, back, enabled);
-                    try { cur.RecordGraphicsModified(true); } catch (System.Exception) { }
-                    sub.Commit();
-                    return true;
-                }
-                catch (System.Exception ex)
-                {
-                    XclipErr++;
-                    LogStep("xclip-hata", ex.GetType().Name, br.ObjectId, ex.Message);
-                    return false;
-                }
-            }
-        }
-
-        static bool IsXrefRef(Transaction tr, BlockReference br)
-        {
-            try
-            {
-                BlockTableRecord b = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                if (b == null) return false;
-                return b.IsFromExternalReference || b.IsDependent;
-            }
-            catch (System.Exception) { return false; }
-        }
-
-        static SpatialFilter OpenSpatial(Transaction tr, BlockReference br, bool forWrite)
-        {
-            try
-            {
-                if (br == null || br.ExtensionDictionary.IsNull) return null;
-                DBDictionary ext = tr.GetObject(br.ExtensionDictionary, OpenMode.ForRead) as DBDictionary;
-                if (ext == null || !ext.Contains("ACAD_FILTER")) return null;
-                DBDictionary filters = tr.GetObject(ext.GetAt("ACAD_FILTER"), OpenMode.ForRead) as DBDictionary;
-                if (filters == null || !filters.Contains("SPATIAL")) return null;
-                return tr.GetObject(filters.GetAt("SPATIAL"), forWrite ? OpenMode.ForWrite : OpenMode.ForRead) as SpatialFilter;
-            }
-            catch (System.Exception) { return null; }
         }
 
         static int FlattenImage(RasterImage img, ref int projN)

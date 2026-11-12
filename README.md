@@ -207,7 +207,7 @@ Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (
 
 Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
 
-Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Bu alandaki blokların tanımları da (iç içe bloklar ve dinamik bloğun *U kopyaları) düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). Xref tanımlarına girilmez. Blok referansının ekleme Z değeri, attribute'ları ve XCLIP (spatial filter) sınırı da Z=0 yapılır.
+Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Bu alandaki blokların tanımları da (iç içe bloklar ve dinamik bloğun *U kopyaları) düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). Xref tanımlarına girilmez. Blok referansının ekleme Z değeri ve attribute'ları da sıfırlanır. XCLIP sınırına dokunulmaz.
 
 - Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
 - LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali `-Z` olanlarda bulge ters çevrilir, plan değişmez. Z eksenine çok yakın normaller `+Z` yapılır.
