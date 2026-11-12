@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Reflection;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
+using Autodesk.AutoCAD.DatabaseServices.Filters;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
@@ -16,11 +17,14 @@ namespace CadAiDesigner
     /// (Model, or the active layout's paper space), the way FLATTEN does.
     /// Normals within 0.001 rad of ±Z are snapped to +Z; other planar objects are
     /// projected. Referenced block definitions (nested and dynamic *U) are flattened
-    /// too, and each definition's Origin Z is set to 0. Xrefs are not opened. One transaction, one UNDO.
+    /// too, and each definition's Origin Z is set to 0. XCLIP frames are dropped onto Z=0.
+    /// Xrefs are not opened. One transaction, one UNDO.
     /// </summary>
     public class ZSifirlaCommands
     {
         const double Tol = 1e-8;
+        const double ReportZ = 1e-6;
+        static int XclipFixed;
 
         [CommandMethod("ZSIFIRLA", CommandFlags.Modal | CommandFlags.NoBlockEditor | CommandFlags.Redraw)]
         [CommandMethod("AIDZSIFIRLA", CommandFlags.Modal | CommandFlags.NoBlockEditor | CommandFlags.Redraw)]
@@ -32,7 +36,8 @@ namespace CadAiDesigner
             Database db = doc.Database;
 
             int fixedN = 0, elevN = 0, thickN = 0, projN = 0, skipN = 0, lockedN = 0, errN = 0, total = 0;
-            int blocksN = 0, blockFixed = 0;
+            int blocksN = 0, blockFixed = 0, blockVisited = 0;
+            XclipFixed = 0;
             string firstErr = null;
             string spaceLabel = "Model";
             string leftover = null;
@@ -93,7 +98,7 @@ namespace CadAiDesigner
                             }
                         }
 
-                        FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
+                        FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref blockVisited, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
                         ForceInserts(tr, space, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                         leftover = CollectLeftover(tr, space, spaceLabel, processedBlocks);
                     }
@@ -140,7 +145,9 @@ namespace CadAiDesigner
                 + "Atlanan (düşey): " + skipN + ". "
                 + "Kilitli katmandaki: " + lockedN + ". "
                 + "Blok tanımı: " + blocksN + ". "
+                + "Blok içi taranan: " + blockVisited + ". "
                 + "Blok içi düzeltilen: " + blockFixed + ". "
+                + "XCLIP sınırı düzeltilen: " + XclipFixed + ". "
                 + "Taranan: " + total + ".";
             if (errN > 0) msg += " Hata: " + errN + ".";
             ed.WriteMessage(msg);
@@ -251,7 +258,7 @@ namespace CadAiDesigner
         }
 
         static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen, List<ObjectId> processed,
-            ref int blocksN, ref int blockFixed, ref int lockedN, ref int elevN, ref int thickN, ref int projN, ref int skipN, ref int errN, ref string firstErr)
+            ref int blocksN, ref int blockFixed, ref int blockVisited, ref int lockedN, ref int elevN, ref int thickN, ref int projN, ref int skipN, ref int errN, ref string firstErr)
         {
             while (queue.Count > 0)
             {
@@ -282,6 +289,7 @@ namespace CadAiDesigner
                     try { ent = tr.GetObject(eid, OpenMode.ForRead) as Entity; }
                     catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok varlığı", ex); continue; }
                     if (ent == null || ent.IsErased) continue;
+                    blockVisited++;
                     if (!ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId)) lockedN++;
                     try
                     {
@@ -371,11 +379,12 @@ namespace CadAiDesigner
             if (ent is Leader) return FlattenLeader((Leader)ent, ref elevN, ref thickN, ref projN);
             if (ent is Dimension) return FlattenDim((Dimension)ent, ref elevN, ref thickN, ref projN);
             if (ent is Hatch) return FlattenHatch((Hatch)ent, ref elevN, ref thickN, ref projN);
-            if (ent is BlockReference) return FlattenBlock((BlockReference)ent, ref elevN, ref thickN, ref projN);
+            if (ent is BlockReference) return FlattenBlock(tr, (BlockReference)ent, ref elevN, ref thickN, ref projN);
             if (ent is Face) return FlattenFace((Face)ent);
             if (ent is Solid) return FlattenSolid((Solid)ent, ref thickN, ref projN);
             if (ent is Trace) return FlattenTrace((Trace)ent, ref thickN, ref projN);
             if (ent is Region) return FlattenRegion((Region)ent);
+            if (ent is RasterImage) return FlattenImage((RasterImage)ent, ref projN);
             if (ent is Viewport) return FlattenViewport((Viewport)ent, ref elevN, ref thickN);
             if (ent is Ray) return FlattenRay((Ray)ent, ref elevN, ref thickN);
             if (ent is Xline) return FlattenXline((Xline)ent, ref elevN, ref thickN);
@@ -705,7 +714,7 @@ namespace CadAiDesigner
             return 1;
         }
 
-        static int FlattenBlock(BlockReference br, ref int elevN, ref int thickN, ref int projN)
+        static int FlattenBlock(Transaction tr, BlockReference br, ref int elevN, ref int thickN, ref int projN)
         {
             // Insertion Z in this owner (model space or a parent block). Definition Origin is handled separately.
             Vector3d n = br.Normal;
@@ -713,13 +722,19 @@ namespace CadAiDesigner
             Point3d p = br.Position;
             double rot = br.Rotation;
             double newRot = PlanAngle(n, rot);
-            if (!project && Math.Abs(p.Z) <= Tol && AngClose(rot, newRot)) return 0;
-            Write(br);
-            if (project) { br.Normal = Vector3d.ZAxis; projN++; }
-            br.Position = Flat(p);
-            if (!AngClose(rot, newRot)) br.Rotation = newRot;
-            if (ApplyElev(br, ref elevN)) { }
-            if (ApplyThick(br, ref thickN)) { }
+            bool move = project || Math.Abs(p.Z) > Tol || !AngClose(rot, newRot);
+            if (move)
+            {
+                Write(br);
+                if (project) { br.Normal = Vector3d.ZAxis; projN++; }
+                br.Position = Flat(p);
+                if (!AngClose(rot, newRot)) br.Rotation = newRot;
+                if (ApplyElev(br, ref elevN)) { }
+                if (ApplyThick(br, ref thickN)) { }
+            }
+            bool clip = FlattenXclip(tr, br);
+            if (clip) XclipFixed++;
+            if (!move && !clip) return 0;
             return 1;
         }
 
@@ -969,22 +984,12 @@ namespace CadAiDesigner
             }
         }
 
-        const double ReportZ = 1e-6;
-
         static string CollectLeftover(Transaction tr, BlockTableRecord space, string spaceLabel, List<ObjectId> blocks)
         {
             int count = 0;
             List<string> samples = new List<string>();
-            List<string> inserts = new List<string>();
-            ScanOwner(tr, space, spaceLabel, ref count, samples, inserts);
-            foreach (ObjectId bid in blocks)
-            {
-                BlockTableRecord btr = tr.GetObject(bid, OpenMode.ForRead) as BlockTableRecord;
-                if (btr == null) continue;
-                string name = btr.Name;
-                try { if (string.IsNullOrEmpty(name)) name = bid.Handle.ToString(); } catch (System.Exception) { }
-                ScanOwner(tr, btr, name, ref count, samples, inserts);
-            }
+            HashSet<ObjectId> stack = new HashSet<ObjectId>();
+            ScanDeep(tr, space, spaceLabel, Matrix3d.Identity, stack, ref count, samples);
             if (count == 0) return "Kalan Z'li nesne: 0.";
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
             sb.Append("Kalan Z'li nesne: ").Append(count).Append(".");
@@ -995,47 +1000,255 @@ namespace CadAiDesigner
                 sb.Append("\n  ").Append(s);
                 shown++;
             }
-            foreach (string s in inserts)
-            {
-                if (shown >= 5) break;
-                sb.Append("\n  ").Append(s);
-                shown++;
-            }
             return sb.ToString();
         }
 
-        static void ScanOwner(Transaction tr, BlockTableRecord owner, string blockName, ref int count, List<string> samples, List<string> inserts)
+        static void ScanDeep(Transaction tr, BlockTableRecord owner, string path, Matrix3d toWorld, HashSet<ObjectId> stack, ref int count, List<string> samples)
         {
-            foreach (ObjectId id in owner)
+            if (owner == null || !stack.Add(owner.ObjectId)) return;
+            try
             {
-                if (!id.IsValid || id.IsErased) continue;
-                Entity ent = null;
-                try { ent = tr.GetObject(id, OpenMode.ForRead) as Entity; }
-                catch (System.Exception) { continue; }
-                if (ent == null || ent.IsErased) continue;
-                Extents3d ex;
-                try { ex = ent.GeometricExtents; }
-                catch (System.Exception) { continue; }
-                if (Math.Abs(ex.MinPoint.Z) <= ReportZ && Math.Abs(ex.MaxPoint.Z) <= ReportZ) continue;
-                count++;
-                string type = ent.GetType().Name;
-                try { string dxf = ent.GetRXClass().DxfName; if (!string.IsNullOrEmpty(dxf)) type = dxf; } catch (System.Exception) { }
-                string layer = "";
-                try { layer = ent.Layer; } catch (System.Exception) { }
-                string line = "Blok " + blockName + ", " + type + ", katman " + layer + ", Z " + Fmt(ex.MinPoint.Z) + " .. " + Fmt(ex.MaxPoint.Z);
-                BlockReference br = ent as BlockReference;
-                if (br != null)
+                foreach (ObjectId id in owner)
                 {
-                    try
+                    if (!id.IsValid || id.IsErased) continue;
+                    Entity ent = null;
+                    try { ent = tr.GetObject(id, OpenMode.ForRead) as Entity; }
+                    catch (System.Exception) { continue; }
+                    if (ent == null || ent.IsErased) continue;
+                    BlockReference br = ent as BlockReference;
+                    if (br != null)
                     {
-                        BlockTableRecord def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                        if (def != null) line += " (referans " + def.Name + ")";
+                        string xref = XclipLine(tr, br, path, toWorld);
+                        if (xref != null) AddSample(ref count, samples, xref);
+                        BlockTableRecord def = null;
+                        try { def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord; }
+                        catch (System.Exception) { def = null; }
+                        if (def != null && !SkipDefinition(def))
+                        {
+                            string child = path + " > " + SafeName(def);
+                            try { ScanDeep(tr, def, child, toWorld * br.BlockTransform, stack, ref count, samples); }
+                            catch (System.Exception) { }
+                        }
                     }
-                    catch (System.Exception) { }
-                    if (inserts.Count < 5) inserts.Add(line);
+                    Extents3d ex;
+                    try { ex = ent.GeometricExtents; }
+                    catch (System.Exception) { continue; }
+                    double minZ, maxZ;
+                    if (!WorldSpan(ex, toWorld, out minZ, out maxZ)) continue;
+                    if (Math.Abs(minZ) <= ReportZ && Math.Abs(maxZ) <= ReportZ) continue;
+                    string type = ent.GetType().Name;
+                    try { string dxf = ent.GetRXClass().DxfName; if (!string.IsNullOrEmpty(dxf)) type = dxf; } catch (System.Exception) { }
+                    string layer = "";
+                    try { layer = ent.Layer; } catch (System.Exception) { }
+                    string line = path + " > " + type + ", katman " + layer + ", Z " + Fmt(minZ) + " .. " + Fmt(maxZ);
+                    if (br != null)
+                    {
+                        try
+                        {
+                            BlockTableRecord def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                            if (def != null) line += " (referans " + SafeName(def) + ")";
+                        }
+                        catch (System.Exception) { }
+                    }
+                    AddSample(ref count, samples, line);
                 }
-                else if (samples.Count < 5) samples.Add(line);
             }
+            finally { stack.Remove(owner.ObjectId); }
+        }
+
+        static void AddSample(ref int count, List<string> samples, string line)
+        {
+            count++;
+            if (samples.Count < 5) samples.Add(line);
+        }
+
+        static string SafeName(BlockTableRecord btr)
+        {
+            try { if (!string.IsNullOrEmpty(btr.Name)) return btr.Name; }
+            catch (System.Exception) { }
+            try { return btr.ObjectId.Handle.ToString(); }
+            catch (System.Exception) { return "?"; }
+        }
+
+        static bool WorldSpan(Extents3d ex, Matrix3d toWorld, out double minZ, out double maxZ)
+        {
+            minZ = 0;
+            maxZ = 0;
+            try
+            {
+                Point3d a = ex.MinPoint, b = ex.MaxPoint;
+                Point3d[] corners = new Point3d[]
+                {
+                    new Point3d(a.X, a.Y, a.Z), new Point3d(b.X, a.Y, a.Z), new Point3d(a.X, b.Y, a.Z), new Point3d(b.X, b.Y, a.Z),
+                    new Point3d(a.X, a.Y, b.Z), new Point3d(b.X, a.Y, b.Z), new Point3d(a.X, b.Y, b.Z), new Point3d(b.X, b.Y, b.Z)
+                };
+                minZ = double.MaxValue;
+                maxZ = double.MinValue;
+                for (int i = 0; i < corners.Length; i++)
+                {
+                    double z = corners[i].TransformBy(toWorld).Z;
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                }
+                return true;
+            }
+            catch (System.Exception) { return false; }
+        }
+
+        /// <summary>World Z of an XCLIP frame. Null when the filter is absent or already on Z=0.</summary>
+        static string XclipLine(Transaction tr, BlockReference br, string path, Matrix3d ownerToWorld)
+        {
+            SpatialFilter sf = OpenSpatial(tr, br, false);
+            if (sf == null) return null;
+            SpatialFilterDefinition def;
+            try { def = sf.Definition; }
+            catch (System.Exception) { return null; }
+            double minZ, maxZ;
+            bool measured = XclipWorldZ(br, sf, def, ownerToWorld, out minZ, out maxZ);
+            bool bad = !IsExactPositiveZ(def.Normal) || Math.Abs(def.Elevation) > Tol || FilterHasZ(sf) || (measured && (Math.Abs(minZ) > ReportZ || Math.Abs(maxZ) > ReportZ));
+            if (!bad) return null;
+            string name = path;
+            try
+            {
+                BlockTableRecord defb = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                if (defb != null) name = path + " > " + SafeName(defb);
+            }
+            catch (System.Exception) { }
+            string z = measured ? (", Z " + Fmt(minZ) + " .. " + Fmt(maxZ)) : "";
+            return "XCLIP " + name + ", katman " + br.Layer + ", elev " + Fmt(def.Elevation) + z;
+        }
+
+        static bool XclipWorldZ(BlockReference br, SpatialFilter sf, SpatialFilterDefinition def, Matrix3d ownerToWorld, out double minZ, out double maxZ)
+        {
+            minZ = 0;
+            maxZ = 0;
+            try
+            {
+                Point2dCollection pts = def.GetPoints();
+                if (pts == null || pts.Count == 0) return false;
+                Matrix3d clipToWcs = sf.ClipSpaceToWorldCoordinateSystemTransform;
+                Matrix3d inverse = sf.OriginalInverseBlockTransform;
+                Matrix3d blockToWorld = ownerToWorld * br.BlockTransform;
+                Matrix3d toWorld;
+                try { toWorld = blockToWorld * inverse.Inverse() * clipToWcs; }
+                catch (System.Exception) { toWorld = blockToWorld * clipToWcs; }
+                minZ = double.MaxValue;
+                maxZ = double.MinValue;
+                foreach (Point2d p in pts)
+                {
+                    double z = new Point3d(p.X, p.Y, def.Elevation).TransformBy(toWorld).Z;
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                }
+                return true;
+            }
+            catch (System.Exception) { return false; }
+        }
+
+        static bool FlattenXclip(Transaction tr, BlockReference br)
+        {
+            SpatialFilter sf = OpenSpatial(tr, br, false);
+            if (sf == null) return false;
+            SpatialFilterDefinition def = sf.Definition;
+            Point2dCollection src = def.GetPoints();
+            if (src == null || src.Count < 2) return false;
+            if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= Tol && !FilterHasZ(sf)) return false;
+            if (!sf.IsWriteEnabled) sf.UpgradeOpen();
+            Point2dCollection pts = new Point2dCollection();
+            foreach (Point2d p in src) pts.Add(p);
+            bool enabled = true;
+            try { enabled = def.Enabled; } catch (System.Exception) { }
+            if (!TryAssignDefinition(sf, pts, enabled))
+                ReplaceSpatialFilter(tr, br, sf, pts, enabled);
+            else if (FilterHasZ(sf))
+                ReplaceSpatialFilter(tr, br, sf, pts, enabled);
+            try { if (!br.IsWriteEnabled) br.UpgradeOpen(); br.RecordGraphicsModified(true); } catch (System.Exception) { }
+            return true;
+        }
+
+        static bool TryAssignDefinition(SpatialFilter sf, Point2dCollection pts, bool enabled)
+        {
+            try
+            {
+                sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, double.PositiveInfinity, double.NegativeInfinity, enabled);
+                return true;
+            }
+            catch (System.Exception)
+            {
+                try
+                {
+                    sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, 1e99, -1e99, enabled);
+                    return true;
+                }
+                catch (System.Exception) { return false; }
+            }
+        }
+
+        static void ReplaceSpatialFilter(Transaction tr, BlockReference br, SpatialFilter oldFilter, Point2dCollection pts, bool enabled)
+        {
+            if (br.ExtensionDictionary.IsNull) return;
+            DBDictionary ext = tr.GetObject(br.ExtensionDictionary, OpenMode.ForRead) as DBDictionary;
+            if (ext == null || !ext.Contains("ACAD_FILTER")) return;
+            DBDictionary filters = tr.GetObject(ext.GetAt("ACAD_FILTER"), OpenMode.ForRead) as DBDictionary;
+            if (filters == null) return;
+            if (!filters.IsWriteEnabled) filters.UpgradeOpen();
+            filters.Remove("SPATIAL");
+            if (!oldFilter.IsWriteEnabled) oldFilter.UpgradeOpen();
+            oldFilter.Erase();
+            SpatialFilter neu = new SpatialFilter();
+            if (!TryAssignDefinition(neu, pts, enabled))
+                neu.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, 0.0, 0.0, enabled);
+            filters.SetAt("SPATIAL", neu);
+            tr.AddNewlyCreatedDBObject(neu, true);
+        }
+
+        static SpatialFilter OpenSpatial(Transaction tr, BlockReference br, bool forWrite)
+        {
+            try
+            {
+                if (br == null || br.ExtensionDictionary.IsNull) return null;
+                DBDictionary ext = tr.GetObject(br.ExtensionDictionary, OpenMode.ForRead) as DBDictionary;
+                if (ext == null || !ext.Contains("ACAD_FILTER")) return null;
+                DBDictionary filters = tr.GetObject(ext.GetAt("ACAD_FILTER"), OpenMode.ForRead) as DBDictionary;
+                if (filters == null || !filters.Contains("SPATIAL")) return null;
+                return tr.GetObject(filters.GetAt("SPATIAL"), forWrite ? OpenMode.ForWrite : OpenMode.ForRead) as SpatialFilter;
+            }
+            catch (System.Exception) { return null; }
+        }
+
+        static bool FilterHasZ(SpatialFilter sf)
+        {
+            try
+            {
+                if (Math.Abs(Tz(sf.OriginalInverseBlockTransform)) > Tol) return true;
+                if (Math.Abs(Tz(sf.ClipSpaceToWorldCoordinateSystemTransform)) > Tol) return true;
+            }
+            catch (System.Exception) { }
+            return false;
+        }
+
+        static double Tz(Matrix3d m)
+        {
+            try { return m.CoordinateSystem3d.Origin.Z; }
+            catch (System.Exception) { return m[2, 3]; }
+        }
+
+        static int FlattenImage(RasterImage img, ref int projN)
+        {
+            CoordinateSystem3d cs = img.Orientation;
+            Point3d o = cs.Origin;
+            Vector3d x = cs.Xaxis, y = cs.Yaxis;
+            if (Math.Abs(o.Z) <= Tol && Math.Abs(x.Z) <= Tol && Math.Abs(y.Z) <= Tol) return 0;
+            Vector3d xf = new Vector3d(x.X, x.Y, 0);
+            Vector3d yf = new Vector3d(y.X, y.Y, 0);
+            if (xf.Length <= Tol) xf = Vector3d.XAxis;
+            else xf = xf.GetNormal() * Math.Max(x.Length, Tol);
+            if (yf.Length <= Tol) yf = Vector3d.YAxis;
+            else yf = yf.GetNormal() * Math.Max(y.Length, Tol);
+            Write(img);
+            img.Orientation = new CoordinateSystem3d(new Point3d(o.X, o.Y, 0), xf, yf);
+            projN++;
+            return 1;
         }
 
         static int FlattenFace(Face face)
@@ -1148,7 +1361,10 @@ namespace CadAiDesigner
             if (flat && Math.Abs(z) > Tol && !(hadElev && Math.Abs(elev - z) <= 1e-6))
                 ent.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
             else if (extentsOk && span > Tol)
-                ent.TransformBy(ProjectToXY);
+            {
+                try { ent.TransformBy(Matrix3d.Projection(new Plane(Point3d.Origin, Vector3d.ZAxis), Vector3d.ZAxis)); }
+                catch (System.Exception) { ent.TransformBy(ProjectToXY); }
+            }
             if (ApplyThick(ent, ref thickN)) { }
             return 1;
         }
