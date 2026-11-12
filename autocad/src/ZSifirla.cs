@@ -182,7 +182,7 @@ namespace CadAiDesigner
             bool changed = Finish(pl, hadElev, ref elevN, ref thickN);
             foreach (ObjectId vid in pl)
             {
-                PolylineVertex2d v = tr.GetObject(vid, OpenMode.ForRead) as PolylineVertex2d;
+                Vertex2d v = tr.GetObject(vid, OpenMode.ForRead) as Vertex2d;
                 if (v == null) continue;
                 Point3d p = v.Position;
                 if (Math.Abs(p.Z) <= Tol) continue;
