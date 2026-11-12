@@ -201,3 +201,18 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+
+## Z=0 (ZSIFIRLA / AIDZSIFIRLA)
+
+Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
+
+Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Blok tanımlarına girilmez; yalnız blok referansının ekleme Z değeri değişir.
+
+- Çizgi, spline ve 3B polyline: nokta Z=0. Düşey çizgi atlanır.
+- Yay, çember, elips, LW polyline, yazı, blok, ölçü, tarama ve multileader: normali Z eksenine paralelse düzeltilir; eğik düzlem atlanır.
+- Polyline, Hatch, Polyline2d, ölçü ve `Elevation` özelliği olan nesnelerde Elevation=0. `Thickness` özelliği 0 yapılır.
+- Işın ve xline: taban Z=0, yön XY düzlemine izdüşürülür; düşey olanlar atlanır.
+- Kilitli katmandaki nesneler atlanır.
+- Çizimin `ELEVATION` sistem değişkeni 0 yapılır. UCS Dünya değilse özet, UCS orijininin Z değerini yazar (UCS değiştirilmez).
+- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, atlanan (3B/eğik normal), kilitli katman. Tek UNDO.
