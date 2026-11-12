@@ -207,7 +207,7 @@ Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (
 
 Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
 
-Geçerli alan, Model ve bütün paftalar tek işlemde WCS Z=0 yapılır. Sıradan blok tanımları da düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). Dinamik bloklar, iç içe dinamik insert'ler ve anonim `*U` / `A$C` tanımları değiştirilmez. Xref tanımlarına girilmez. LW polyline Elevation her zaman 0 yazılır. Eski Leader normali `-Z` ise yatay düzlemde aynalanır: plan XY durur, normal `+Z` olur. Döndürme yapılmaz. İşlemden sonra bir noktanın XY'si 1e-6'dan fazla kayarsa o nesne geri alınır. Blok referansının ekleme Z değeri sıfırlanır; dinamik insert'te yalnız Position Z yazılır. XCLIP sınırına dokunulmaz.
+Geçerli alan, Model ve bütün paftalar tek işlemde WCS Z=0 yapılır. Sıradan blok tanımları da düzlenir; bloğun Origin Z değeri 0 yapılır (X,Y durur). `A$C` blokları sıradan blok gibi düzlenir. Dinamik bloğun içindeki geometri yalnız Z yönünde kaydırılır; parametre, aksiyon ve grip'e dokunulmaz. İş bitince görünürlük ve konum geri yazılır. Plan kayarsa o tanım geri alınır. Xref tanımlarına girilmez. LW polyline Elevation her zaman 0 yazılır. Eski Leader normali `-Z` ise yatay düzlemde aynalanır: plan XY durur, normal `+Z` olur. Döndürme yapılmaz. İşlemden sonra bir noktanın XY'si 1e-6'dan fazla kayarsa o nesne geri alınır. Blok referansının ekleme Z değeri sıfırlanır; dinamik insert'te yalnız Position Z yazılır. XCLIP sınırına dokunulmaz.
 
 - Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
 - LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali tam `-Z` olan polyline yatay aynayla çevrilir, plan XY değişmez.

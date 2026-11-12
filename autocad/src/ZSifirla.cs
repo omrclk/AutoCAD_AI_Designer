@@ -40,6 +40,7 @@ namespace CadAiDesigner
             LogStep("basla", "", ObjectId.Null, "ZSIFIRLA");
             int fixedN = 0, elevN = 0, thickN = 0, projN = 0, skipN = 0, lockedN = 0, errN = 0, total = 0;
             int blocksN = 0, blockFixed = 0, blockVisited = 0;
+            int dynDefs = 0, dynEnts = 0, dynRolled = 0;
             string firstErr = null;
             string spaceLabel = "Model";
             string leftover = null;
@@ -112,6 +113,7 @@ namespace CadAiDesigner
                         }
 
                         FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref blockVisited, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
+                        FlattenAllDynamic(tr, db, ref dynDefs, ref dynEnts, ref dynRolled, ref errN, ref firstErr);
                         foreach (KeyValuePair<ObjectId, string> sp in spaces)
                         {
                             BlockTableRecord area = (BlockTableRecord)tr.GetObject(sp.Key, OpenMode.ForRead);
@@ -165,6 +167,9 @@ namespace CadAiDesigner
                 + "Blok tanımı: " + blocksN + ". "
                 + "Blok içi taranan: " + blockVisited + ". "
                 + "Blok içi düzeltilen: " + blockFixed + ". "
+                + "Dinamik tanım: " + dynDefs + ". "
+                + "Dinamik içi: " + dynEnts + ". "
+                + "Dinamik geri alınan: " + dynRolled + ". "
                 + "Taranan: " + total + ".";
             if (errN > 0) msg += " Hata: " + errN + ".";
             ed.WriteMessage(msg);
@@ -180,7 +185,7 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nUCS Dünya değil; orijin Z = " + Fmt(UcsOriginZ(ed)) + " (UCS değiştirilmedi).");
             ed.WriteMessage("\n");
             try { ed.Regen(); } catch (System.Exception) { }
-            LogStep("ozet", spaceLabel, ObjectId.Null, "fixed=" + fixedN + " elev=" + elevN + " thick=" + thickN + " proj=" + projN + " skip=" + skipN + " locked=" + lockedN + " blocks=" + blocksN + " blockVisited=" + blockVisited + " blockFixed=" + blockFixed + " err=" + errN + " total=" + total);
+            LogStep("ozet", spaceLabel, ObjectId.Null, "fixed=" + fixedN + " elev=" + elevN + " thick=" + thickN + " proj=" + projN + " skip=" + skipN + " locked=" + lockedN + " blocks=" + blocksN + " blockVisited=" + blockVisited + " blockFixed=" + blockFixed + " dynFixed=" + dynDefs + " dynEnts=" + dynEnts + " dynRolled=" + dynRolled + " err=" + errN + " total=" + total);
             LogStep("bitti", spaceLabel, ObjectId.Null, "ZSIFIRLA");
             }
             finally { CloseZLog(); }
@@ -527,6 +532,23 @@ namespace CadAiDesigner
             return false;
         }
 
+        static bool XyMovedRel(List<Point2d> before, List<Point2d> after)
+        {
+            if (before == null || after == null || before.Count == 0 || after.Count == 0) return false;
+            int n = before.Count < after.Count ? before.Count : after.Count;
+            for (int i = 0; i < n; i++)
+            {
+                if (RelFar(before[i].X, after[i].X) || RelFar(before[i].Y, after[i].Y)) return true;
+            }
+            return false;
+        }
+
+        static bool RelFar(double a, double b)
+        {
+            double m = Math.Max(1.0, Math.Max(Math.Abs(a), Math.Abs(b)));
+            return Math.Abs(a - b) > 1e-6 * m;
+        }
+
         static string ZInfo(Entity ent)
         {
             try
@@ -649,14 +671,13 @@ namespace CadAiDesigner
             return false;
         }
 
-        /// <summary>Dynamic masters, anonymous *U/*D/*X/*T blocks, and bound anonymous A$C blocks.</summary>
+        /// <summary>Dynamic masters and anonymous *U/*D/*X/*T blocks. Bound A$C blocks are ordinary unless dynamic.</summary>
         static bool IsProtectedBlock(BlockTableRecord btr)
         {
             try { if (btr.IsDynamicBlock) return true; } catch (System.Exception) { }
             try { if (btr.IsAnonymous) return true; } catch (System.Exception) { }
             string name = "";
             try { name = btr.Name ?? ""; } catch (System.Exception) { name = ""; }
-            if (name.StartsWith("A$C", StringComparison.OrdinalIgnoreCase)) return true;
             if (name.Length >= 2 && name[0] == '*')
             {
                 char c = char.ToUpperInvariant(name[1]);
@@ -698,6 +719,13 @@ namespace CadAiDesigner
             if (name.IndexOf("Parameter", StringComparison.OrdinalIgnoreCase) >= 0) return true;
             if (name.IndexOf("Action", StringComparison.OrdinalIgnoreCase) >= 0) return true;
             if (name.IndexOf("Grip", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.IndexOf("DynamicBlockPurgePreventer", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.IndexOf("EvalGraph", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.IndexOf("BlockRepresentation", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.StartsWith("AcDbBlock", StringComparison.OrdinalIgnoreCase)
+                && (name.IndexOf("Parameter", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("Action", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("Grip", StringComparison.OrdinalIgnoreCase) >= 0)) return true;
             return false;
         }
 
@@ -764,6 +792,367 @@ namespace CadAiDesigner
             {
                 if (sub != null) sub.Dispose();
             }
+        }
+
+        class DynProp
+        {
+            public int Index;
+            public string Name;
+            public object Value;
+            public bool ReadOnly;
+        }
+
+        class DynSnap
+        {
+            public ObjectId RefId;
+            public ObjectId MasterId;
+            public Point3d Position;
+            public double Rotation;
+            public double ScaleX, ScaleY, ScaleZ;
+            public Vector3d Normal;
+            public List<DynProp> Props;
+            public List<Point2d> Xy;
+        }
+
+        /// <summary>
+        /// Flatten Z inside each dynamic master and its *U copies, then put the insert's
+        /// visibility and placement back. One nested transaction per definition so a plan
+        /// shift aborts the whole block. No mirror and no rotation.
+        /// </summary>
+        static void FlattenAllDynamic(Transaction tr, Database db, ref int dynDefs, ref int dynEnts, ref int dynRolled, ref int errN, ref string firstErr)
+        {
+            List<DynSnap> snaps = CollectDynamicRefs(tr, db);
+            Dictionary<ObjectId, List<DynSnap>> groups = new Dictionary<ObjectId, List<DynSnap>>();
+            foreach (DynSnap s in snaps)
+            {
+                if (s == null || s.MasterId.IsNull) continue;
+                List<DynSnap> list;
+                if (!groups.TryGetValue(s.MasterId, out list))
+                {
+                    list = new List<DynSnap>();
+                    groups[s.MasterId] = list;
+                }
+                list.Add(s);
+            }
+            foreach (KeyValuePair<ObjectId, List<DynSnap>> kv in groups)
+            {
+                int n = FlattenOneDynamic(tr, kv.Key, kv.Value, ref errN, ref firstErr);
+                if (n < 0) dynRolled++;
+                else
+                {
+                    if (n > 0) dynDefs++;
+                    dynEnts += n;
+                }
+            }
+        }
+
+        static List<DynSnap> CollectDynamicRefs(Transaction tr, Database db)
+        {
+            List<DynSnap> list = new List<DynSnap>();
+            HashSet<ObjectId> seen = new HashSet<ObjectId>();
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            foreach (ObjectId bid in bt)
+            {
+                BlockTableRecord btr = tr.GetObject(bid, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null) continue;
+                if (btr.IsFromExternalReference || btr.IsDependent) continue;
+                try { if (btr.IsFromOverlayReference) continue; } catch (System.Exception) { }
+                foreach (ObjectId eid in btr)
+                {
+                    if (!eid.IsValid || eid.IsErased) continue;
+                    BlockReference br = null;
+                    try { br = tr.GetObject(eid, OpenMode.ForRead) as BlockReference; }
+                    catch (System.Exception) { continue; }
+                    if (br == null || !IsDynamicRef(br) || !seen.Add(br.ObjectId)) continue;
+                    DynSnap snap = TakeDynSnap(tr, br);
+                    if (snap != null) list.Add(snap);
+                }
+            }
+            return list;
+        }
+
+        static DynSnap TakeDynSnap(Transaction tr, BlockReference br)
+        {
+            DynSnap s = new DynSnap();
+            s.RefId = br.ObjectId;
+            s.MasterId = br.BlockTableRecord;
+            try
+            {
+                ObjectId dyn = br.DynamicBlockTableRecord;
+                if (!dyn.IsNull) s.MasterId = dyn;
+            }
+            catch (System.Exception) { }
+            s.Position = br.Position;
+            try { s.Rotation = br.Rotation; } catch (System.Exception) { }
+            try
+            {
+                Scale3d sc = br.ScaleFactors;
+                s.ScaleX = sc.X; s.ScaleY = sc.Y; s.ScaleZ = sc.Z;
+            }
+            catch (System.Exception) { s.ScaleX = s.ScaleY = s.ScaleZ = 1; }
+            s.Normal = Vector3d.ZAxis;
+            try { s.Normal = br.Normal; } catch (System.Exception) { }
+            s.Props = new List<DynProp>();
+            try
+            {
+                int index = 0;
+                foreach (DynamicBlockReferenceProperty p in br.DynamicBlockReferencePropertyCollection)
+                {
+                    DynProp dp = new DynProp();
+                    dp.Index = index++;
+                    try { dp.Name = p.PropertyName; } catch (System.Exception) { dp.Name = ""; }
+                    try { dp.ReadOnly = p.ReadOnly; } catch (System.Exception) { dp.ReadOnly = true; }
+                    try { dp.Value = p.Value; } catch (System.Exception) { dp.Value = null; }
+                    s.Props.Add(dp);
+                }
+            }
+            catch (System.Exception) { }
+            s.Xy = SampleRefXY(tr, br);
+            return s;
+        }
+
+        static List<Point2d> SampleRefXY(Transaction tr, BlockReference br)
+        {
+            List<Point2d> pts = new List<Point2d>();
+            try { pts.Add(new Point2d(br.Position.X, br.Position.Y)); } catch (System.Exception) { }
+            try
+            {
+                Matrix3d xf = br.BlockTransform;
+                BlockTableRecord def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                if (def == null) return pts;
+                int n = 0;
+                foreach (ObjectId id in def)
+                {
+                    if (n >= 8) break;
+                    Entity e = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                    if (e == null || IsDynamicPart(e) || e is BlockReference) continue;
+                    Point3d loc;
+                    if (!TryEntityPoint(e, out loc)) continue;
+                    Point3d w = loc.TransformBy(xf);
+                    pts.Add(new Point2d(w.X, w.Y));
+                    n++;
+                }
+            }
+            catch (System.Exception) { }
+            return pts;
+        }
+
+        static bool TryEntityPoint(Entity ent, out Point3d p)
+        {
+            p = Point3d.Origin;
+            try
+            {
+                Line ln = ent as Line;
+                if (ln != null) { p = ln.StartPoint; return true; }
+                Polyline pl = ent as Polyline;
+                if (pl != null && pl.NumberOfVertices > 0) { p = pl.GetPoint3dAt(0); return true; }
+                Circle c = ent as Circle;
+                if (c != null) { p = c.Center; return true; }
+                Arc a = ent as Arc;
+                if (a != null) { p = a.Center; return true; }
+                DBText tx = ent as DBText;
+                if (tx != null) { p = tx.Position; return true; }
+                MText mt = ent as MText;
+                if (mt != null) { p = mt.Location; return true; }
+                DBPoint pt = ent as DBPoint;
+                if (pt != null) { p = pt.Position; return true; }
+                Leader ld = ent as Leader;
+                if (ld != null && ld.NumVertices > 0) { p = ld.VertexAt(0); return true; }
+            }
+            catch (System.Exception) { return false; }
+            return false;
+        }
+
+        static int FlattenOneDynamic(Transaction tr, ObjectId masterId, List<DynSnap> snaps, ref int errN, ref string firstErr)
+        {
+            string name = masterId.Handle.ToString();
+            Database db = null;
+            try
+            {
+                BlockTableRecord pre = tr.GetObject(masterId, OpenMode.ForRead) as BlockTableRecord;
+                if (pre != null) name = SafeName(pre);
+                if (pre == null || pre.IsFromExternalReference || pre.IsDependent) return 0;
+                db = pre.Database;
+            }
+            catch (System.Exception) { return 0; }
+            Transaction sub = null;
+            bool closed = false;
+            try
+            {
+                sub = db.TransactionManager.StartTransaction();
+                int n = FlattenDefZ(sub, masterId);
+                BlockTableRecord master = sub.GetObject(masterId, OpenMode.ForRead) as BlockTableRecord;
+                if (master != null)
+                {
+                    ObjectIdCollection anon = null;
+                    try { anon = master.GetAnonymousBlockIds(); } catch (System.Exception) { anon = null; }
+                    if (anon != null)
+                    {
+                        foreach (ObjectId aid in anon)
+                            n += FlattenDefZ(sub, aid);
+                    }
+                }
+                foreach (DynSnap s in snaps) RestoreDynSnap(sub, s);
+                bool shifted = false;
+                foreach (DynSnap s in snaps)
+                {
+                    BlockReference br = sub.GetObject(s.RefId, OpenMode.ForRead) as BlockReference;
+                    if (br == null) continue;
+                    if (XyMovedRel(s.Xy, SampleRefXY(sub, br))) { shifted = true; break; }
+                }
+                if (shifted)
+                {
+                    sub.Abort();
+                    closed = true;
+                    LogStep("failed dynamic-xy-shift", name, masterId, "rolled back");
+                    LogStep("rolled back", name, masterId, "dynamic");
+                    if (firstErr == null) firstErr = "dynamic-xy-shift " + name;
+                    errN++;
+                    return -1;
+                }
+                sub.Commit();
+                closed = true;
+                LogStep("fixed dynamic", name, masterId, "n=" + n);
+                return n;
+            }
+            catch (System.Exception ex)
+            {
+                if (sub != null && !closed)
+                {
+                    try { sub.Abort(); } catch (System.Exception) { }
+                    closed = true;
+                }
+                LogStep("failed dynamic-xy-shift", name, masterId, "rolled back " + ex.Message);
+                LogStep("rolled back", name, masterId, "dynamic");
+                NoteErr(ref errN, ref firstErr, "dynamic " + name, ex);
+                return -1;
+            }
+            finally
+            {
+                if (sub != null) sub.Dispose();
+            }
+        }
+
+        static void RestoreDynSnap(Transaction tr, DynSnap s)
+        {
+            BlockReference br = tr.GetObject(s.RefId, OpenMode.ForWrite) as BlockReference;
+            if (br == null) return;
+            try
+            {
+                if (Math.Abs(br.Position.X - s.Position.X) > 1e-8 || Math.Abs(br.Position.Y - s.Position.Y) > 1e-8 || Math.Abs(br.Position.Z - s.Position.Z) > 1e-8)
+                    br.Position = s.Position;
+            }
+            catch (System.Exception) { }
+            try { if (Math.Abs(br.Rotation - s.Rotation) > 1e-9) br.Rotation = s.Rotation; } catch (System.Exception) { }
+            try
+            {
+                Scale3d sc = br.ScaleFactors;
+                if (Math.Abs(sc.X - s.ScaleX) > 1e-9 || Math.Abs(sc.Y - s.ScaleY) > 1e-9 || Math.Abs(sc.Z - s.ScaleZ) > 1e-9)
+                    br.ScaleFactors = new Scale3d(s.ScaleX, s.ScaleY, s.ScaleZ);
+            }
+            catch (System.Exception) { }
+            try { if (br.Normal.DistanceTo(s.Normal) > 1e-9) br.Normal = s.Normal; } catch (System.Exception) { }
+            try
+            {
+                int index = 0;
+                foreach (DynamicBlockReferenceProperty p in br.DynamicBlockReferencePropertyCollection)
+                {
+                    DynProp dp = null;
+                    if (s.Props != null)
+                    {
+                        for (int i = 0; i < s.Props.Count; i++)
+                        {
+                            if (s.Props[i].Index == index) { dp = s.Props[i]; break; }
+                        }
+                    }
+                    index++;
+                    if (dp == null || dp.ReadOnly || dp.Value == null) continue;
+                    try { if (p.ReadOnly) continue; } catch (System.Exception) { continue; }
+                    try
+                    {
+                        if (!object.Equals(p.Value, dp.Value)) p.Value = dp.Value;
+                    }
+                    catch (System.Exception) { }
+                }
+            }
+            catch (System.Exception) { }
+        }
+
+        static int FlattenDefZ(Transaction tr, ObjectId btrId)
+        {
+            BlockTableRecord btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord;
+            if (btr == null) return 0;
+            if (btr.IsFromExternalReference || btr.IsDependent || btr.IsLayout) return 0;
+            int n = 0;
+            foreach (ObjectId id in btr)
+            {
+                if (!id.IsValid || id.IsErased) continue;
+                Entity ent = null;
+                try { ent = tr.GetObject(id, OpenMode.ForRead) as Entity; }
+                catch (System.Exception) { continue; }
+                if (ent == null || IsDynamicPart(ent) || ent is Viewport) continue;
+                if (DropEntityZ(ent)) n++;
+            }
+            return n;
+        }
+
+        /// <summary>Move an entity onto Z=0 by a pure Z translation. XY is checked and undone if it moves.</summary>
+        static bool DropEntityZ(Entity ent)
+        {
+            BlockReference br = ent as BlockReference;
+            if (br != null)
+            {
+                if (Math.Abs(br.Position.Z) <= Tol) return false;
+                Point2d xy = new Point2d(br.Position.X, br.Position.Y);
+                Write(br);
+                br.Position = new Point3d(br.Position.X, br.Position.Y, 0.0);
+                if (RelFar(xy.X, br.Position.X) || RelFar(xy.Y, br.Position.Y))
+                {
+                    br.Position = new Point3d(xy.X, xy.Y, br.Position.Z);
+                    return false;
+                }
+                return true;
+            }
+            double z;
+            bool uniform;
+            if (!TryWorldZ(ent, out z, out uniform) || !uniform || Math.Abs(z) <= Tol) return false;
+            if (IsVerticalSpan(ent)) return false;
+            List<Point2d> before = SampleXY(ent);
+            Write(ent);
+            ent.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
+            if (before.Count > 0 && XyMovedRel(before, SampleXY(ent)))
+            {
+                ent.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, z)));
+                return false;
+            }
+            return true;
+        }
+
+        static bool IsVerticalSpan(Entity ent)
+        {
+            Line ln = ent as Line;
+            if (ln == null) return false;
+            return Math.Abs(ln.StartPoint.X - ln.EndPoint.X) <= Tol
+                && Math.Abs(ln.StartPoint.Y - ln.EndPoint.Y) <= Tol
+                && Math.Abs(ln.StartPoint.Z - ln.EndPoint.Z) > Tol;
+        }
+
+        static bool TryWorldZ(Entity ent, out double z, out bool uniform)
+        {
+            z = 0;
+            uniform = false;
+            if (ent is BlockReference) return false;
+            try
+            {
+                Extents3d ex = ent.GeometricExtents;
+                z = ex.MinPoint.Z;
+                uniform = Math.Abs(ex.MaxPoint.Z - ex.MinPoint.Z) <= 1e-4;
+                return Math.Abs(ex.MinPoint.Z) > Tol || Math.Abs(ex.MaxPoint.Z) > Tol;
+            }
+            catch (System.Exception) { }
+            bool off;
+            if (!TryMeasure(null, ent, out z, out off, out uniform)) return false;
+            return off;
         }
 
         static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen, List<ObjectId> processed,
