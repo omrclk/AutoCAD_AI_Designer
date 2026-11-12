@@ -409,12 +409,8 @@ namespace CadAiDesigner
             if (flat.Length <= Tol) flat = Vector3d.XAxis;
             if (!project && Math.Abs(c.Z) <= Tol) return 0;
             Write(el);
-            if (project) { el.Normal = Vector3d.ZAxis; projN++; }
-            el.Center = new Point3d(c.X, c.Y, 0);
-            el.MajorAxis = flat.GetNormal() * (majorR > Tol ? majorR : flat.Length);
-            el.RadiusRatio = ratio;
-            el.StartAngle = sa;
-            el.EndAngle = ea;
+            if (project) projN++;
+            el.Set(new Point3d(c.X, c.Y, 0), Vector3d.ZAxis, flat.GetNormal() * (majorR > Tol ? majorR : flat.Length), ratio, sa, ea);
             if (ApplyThick(el, ref thickN)) { }
             if (ApplyElev(el, ref elevN)) { }
             return 1;
@@ -560,7 +556,7 @@ namespace CadAiDesigner
             if (project)
             {
                 Write(ml);
-                ml.Normal = Vector3d.ZAxis;
+                // MLeader.Normal is read-only; vertices/text are flattened below.
                 projN++;
             }
             ArrayList leaders = null;
