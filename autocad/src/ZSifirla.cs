@@ -49,14 +49,27 @@ namespace CadAiDesigner
                 using (doc.LockDocument())
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
-                    BlockTableRecord space = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
-                    spaceLabel = SpaceLabel(space);
+                    BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+                    List<KeyValuePair<ObjectId, string>> spaces = new List<KeyValuePair<ObjectId, string>>();
+                    spaces.Add(new KeyValuePair<ObjectId, string>(bt[BlockTableRecord.ModelSpace], "Model"));
+                    try
+                    {
+                        DBDictionary lays = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                        foreach (DBDictionaryEntry de in lays)
+                        {
+                            Layout lay = tr.GetObject(de.Value, OpenMode.ForRead) as Layout;
+                            if (lay == null || lay.ModelType) continue;
+                            spaces.Add(new KeyValuePair<ObjectId, string>(lay.BlockTableRecordId, lay.LayoutName));
+                        }
+                    }
+                    catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Pafta", ex); }
+                    spaceLabel = spaces.Count > 1 ? "Model+pafta" : "Model";
                     List<ObjectId> lockedIds = LockedLayers(tr, db);
                     HashSet<ObjectId> lockedSet = new HashSet<ObjectId>(lockedIds);
                     List<ObjectId> unlocked = new List<ObjectId>();
                     Queue<ObjectId> blockQueue = new Queue<ObjectId>();
                     HashSet<ObjectId> blockSeen = new HashSet<ObjectId>();
-                    blockSeen.Add(space.ObjectId);
+                    foreach (KeyValuePair<ObjectId, string> sp0 in spaces) blockSeen.Add(sp0.Key);
                     try
                     {
                         foreach (ObjectId lid in lockedIds)
@@ -74,36 +87,37 @@ namespace CadAiDesigner
                             }
                         }
 
-                        foreach (ObjectId id in space)
+                        foreach (KeyValuePair<ObjectId, string> sp in spaces)
                         {
-                            if (!id.IsValid || id.IsErased) continue;
-                            Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
-                            if (ent == null || ent.IsErased) continue;
-                            LogStep("alan", spaceLabel, id, ent.GetType().Name);
-                            total++;
-                            bool onLocked = !ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId);
-                            if (onLocked) lockedN++;
-                            try
+                            BlockTableRecord area = (BlockTableRecord)tr.GetObject(sp.Key, OpenMode.ForRead);
+                            LogStep("alan-basla", sp.Value, sp.Key, "SPACE");
+                            foreach (ObjectId id in area)
                             {
-                                int kind = Flatten(tr, ent, ref elevN, ref thickN, ref projN);
+                                if (!id.IsValid || id.IsErased) continue;
+                                Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
+                                if (ent == null || ent.IsErased) continue;
+                                total++;
+                                bool onLocked = !ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId);
+                                if (onLocked) lockedN++;
+                                int kind = ApplyOne(tr, ent, sp.Value, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                                 if (kind == 1) fixedN++;
                                 else if (kind == 2) skipN++;
-                            }
-                            catch (System.Exception ex)
-                            {
-                                NoteErr(ref errN, ref firstErr, ent, ex);
-                            }
-                            BlockReference brTop = ent as BlockReference;
-                            if (brTop != null)
-                            {
-                                FlattenAttributes(tr, brTop, lockedSet, ref fixedN, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, false);
-                                EnqueueBlockRef(tr, brTop, blockSeen, blockQueue);
+                                BlockReference brTop = ent as BlockReference;
+                                if (brTop != null)
+                                {
+                                    FlattenAttributes(tr, brTop, lockedSet, ref fixedN, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, false);
+                                    EnqueueBlockRef(tr, brTop, blockSeen, blockQueue);
+                                }
                             }
                         }
 
                         FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref blockVisited, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
-                        ForceInserts(tr, space, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
-                        leftover = CollectLeftover(tr, space, spaceLabel, processedBlocks);
+                        foreach (KeyValuePair<ObjectId, string> sp in spaces)
+                        {
+                            BlockTableRecord area = (BlockTableRecord)tr.GetObject(sp.Key, OpenMode.ForRead);
+                            ForceInserts(tr, area, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
+                        }
+                        leftover = CollectLeftover(tr, db);
                         LogStep("tani", spaceLabel, ObjectId.Null, "SCAN");
                     }
                     finally
@@ -166,6 +180,7 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nUCS Dünya değil; orijin Z = " + Fmt(UcsOriginZ(ed)) + " (UCS değiştirilmedi).");
             ed.WriteMessage("\n");
             try { ed.Regen(); } catch (System.Exception) { }
+            LogStep("ozet", spaceLabel, ObjectId.Null, "fixed=" + fixedN + " elev=" + elevN + " thick=" + thickN + " proj=" + projN + " skip=" + skipN + " locked=" + lockedN + " blocks=" + blocksN + " blockVisited=" + blockVisited + " blockFixed=" + blockFixed + " err=" + errN + " total=" + total);
             LogStep("bitti", spaceLabel, ObjectId.Null, "ZSIFIRLA");
             }
             finally { CloseZLog(); }
@@ -205,6 +220,54 @@ namespace CadAiDesigner
             }
             catch (System.Exception) { }
         }
+
+        static int ApplyOne(Transaction tr, Entity ent, string where, ref int elevN, ref int thickN, ref int projN, ref int errN, ref string firstErr)
+        {
+            string before = ZInfo(ent);
+            try
+            {
+                int kind = Flatten(tr, ent, ref elevN, ref thickN, ref projN);
+                string after = ZInfo(ent);
+                string action = kind == 1 ? "fixed" : kind == 2 ? "skipped" : "unchanged";
+                LogStep(action, where, ent.ObjectId, ent.GetType().Name + " " + before + " -> " + after);
+                return kind;
+            }
+            catch (System.Exception ex)
+            {
+                NoteErr(ref errN, ref firstErr, ent, ex);
+                LogStep("failed", where, ent.ObjectId, ent.GetType().Name + " " + before + " " + ex.Message);
+                return -1;
+            }
+        }
+
+        static string ZInfo(Entity ent)
+        {
+            try
+            {
+                Polyline pl = ent as Polyline;
+                if (pl != null) return "elev=" + Num(pl.Elevation);
+                Polyline2d p2 = ent as Polyline2d;
+                if (p2 != null) return "elev=" + Num(p2.Elevation);
+                MLeader ml = ent as MLeader;
+                if (ml != null) return "mlZ=" + Num(MLeaderZ(ml));
+                Hatch h = ent as Hatch;
+                if (h != null) return "elev=" + Num(h.Elevation);
+                Dimension dim = ent as Dimension;
+                if (dim != null) return "elev=" + Num(dim.Elevation);
+                DBText tx = ent as DBText;
+                if (tx != null) return "z=" + Num(tx.Position.Z);
+                MText mt = ent as MText;
+                if (mt != null) return "z=" + Num(mt.Location.Z);
+                BlockReference br = ent as BlockReference;
+                if (br != null) return "z=" + Num(br.Position.Z);
+                Line ln = ent as Line;
+                if (ln != null) return "z=" + Num(ln.StartPoint.Z) + "," + Num(ln.EndPoint.Z);
+            }
+            catch (System.Exception) { }
+            return "";
+        }
+
+        static string Num(double v) { return v.ToString("0.###", CultureInfo.InvariantCulture); }
 
         static void NoteErr(ref int errN, ref string firstErr, Entity ent, System.Exception ex)
         {
@@ -332,15 +395,10 @@ namespace CadAiDesigner
                     catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok varlığı", ex); continue; }
                     if (ent == null || ent.IsErased) continue;
                     blockVisited++;
-                    LogStep("blok", SafeName(btr), eid, ent.GetType().Name);
                     if (!ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId)) lockedN++;
-                    try
-                    {
-                        int kind = Flatten(tr, ent, ref elevN, ref thickN, ref projN);
-                        if (kind == 1) { blockFixed++; fixedHere++; Touch(ent); }
-                        else if (kind == 2) skipN++;
-                    }
-                    catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, ent, ex); }
+                    int kind = ApplyOne(tr, ent, "blok:" + SafeName(btr), ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
+                    if (kind == 1) { blockFixed++; fixedHere++; Touch(ent); }
+                    else if (kind == 2) skipN++;
                     BlockReference nested = ent as BlockReference;
                     if (nested == null) continue;
                     int before = blockFixed;
@@ -458,51 +516,69 @@ namespace CadAiDesigner
         /// </summary>
         static int FlattenLw(Polyline pl, ref int elevN, ref int thickN, ref int projN)
         {
-            Vector3d n = pl.Normal;
+            // Elevation is what the Properties palette shows. Write it before any vertex or width call that might throw.
+            double elev = 0;
+            try { elev = pl.Elevation; } catch (System.Exception) { }
+            bool hadElev = Math.Abs(elev) > 1e-9;
+            Vector3d n = Vector3d.ZAxis;
+            try { n = pl.Normal; } catch (System.Exception) { }
             bool project = !IsExactPositiveZ(n);
-            bool negateBulge = n.Z < 0;
-            int nv = pl.NumberOfVertices;
-            Point2d[] xy = new Point2d[nv];
-            double[] bulge = new double[nv];
-            double[] sw = new double[nv];
-            double[] ew = new double[nv];
-            bool anyZ = Math.Abs(pl.Elevation) > Tol;
-            for (int i = 0; i < nv; i++)
+            if (hadElev || project)
             {
-                Point3d w = pl.GetPoint3dAt(i);
-                xy[i] = new Point2d(w.X, w.Y);
-                if (Math.Abs(w.Z) > Tol) anyZ = true;
-                double b = pl.GetBulgeAt(i);
-                bulge[i] = negateBulge ? -b : b;
-                sw[i] = pl.GetStartWidthAt(i);
-                ew[i] = pl.GetEndWidthAt(i);
+                Write(pl);
+                try { pl.Normal = Vector3d.ZAxis; } catch (System.Exception) { }
+                pl.Elevation = 0.0;
+                if (hadElev) elevN++;
+                if (project) projN++;
             }
-            double cw = pl.ConstantWidth;
-            bool hasCw = Math.Abs(cw) > Tol;
-            bool hadElev = Math.Abs(pl.Elevation) > Tol;
-            bool hadThick = Math.Abs(pl.Thickness) > Tol;
-            if (!project && !anyZ && !hadElev && !hadThick) return 0;
-
-            Write(pl);
-            pl.Normal = Vector3d.ZAxis;
-            pl.Elevation = 0.0;
+            int nv = 0;
+            try { nv = pl.NumberOfVertices; } catch (System.Exception) { nv = 0; }
+            bool negateBulge = n.Z < 0;
+            bool movedPt = false;
             for (int i = 0; i < nv; i++)
             {
-                pl.SetPointAt(i, xy[i]);
-                pl.SetBulgeAt(i, bulge[i]);
-                if (!hasCw)
+                try
                 {
-                    pl.SetStartWidthAt(i, sw[i]);
-                    pl.SetEndWidthAt(i, ew[i]);
+                    Point3d w = pl.GetPoint3dAt(i);
+                    double b = pl.GetBulgeAt(i);
+                    if (negateBulge) b = -b;
+                    if (Math.Abs(w.Z) > Tol || project || negateBulge)
+                    {
+                        Write(pl);
+                        pl.SetPointAt(i, new Point2d(w.X, w.Y));
+                        pl.SetBulgeAt(i, b);
+                        movedPt = true;
+                    }
+                }
+                catch (System.Exception) { }
+                try
+                {
+                    double sw = pl.GetStartWidthAt(i);
+                    double ew = pl.GetEndWidthAt(i);
+                    Write(pl);
+                    pl.SetStartWidthAt(i, sw);
+                    pl.SetEndWidthAt(i, ew);
+                }
+                catch (System.Exception) { }
+            }
+            try
+            {
+                if (Math.Abs(pl.Elevation) > 1e-9)
+                {
+                    Write(pl);
+                    pl.Elevation = 0.0;
+                    if (!hadElev) elevN++;
+                    hadElev = true;
                 }
             }
-            if (hasCw) pl.ConstantWidth = cw;
-            pl.Normal = Vector3d.ZAxis;
-            pl.Elevation = 0.0;
-            if (hadThick) { pl.Thickness = 0.0; thickN++; }
-            if (hadElev) elevN++;
-            if (project) projN++;
-            return 1;
+            catch (System.Exception) { }
+            bool hadThick = false;
+            try { hadThick = Math.Abs(pl.Thickness) > Tol; } catch (System.Exception) { }
+            if (hadThick)
+            {
+                try { Write(pl); pl.Thickness = 0.0; thickN++; } catch (System.Exception) { }
+            }
+            return (hadElev || project || movedPt || hadThick) ? 1 : 0;
         }
 
         static int FlattenP2(Transaction tr, Polyline2d pl, ref int elevN, ref int thickN, ref int projN)
@@ -777,14 +853,13 @@ namespace CadAiDesigner
 
         static int FlattenMLeader(MLeader ml, ref int elevN, ref int thickN, ref int projN)
         {
-            Vector3d n = ml.Normal;
-            bool project = !IsExactPositiveZ(n);
-            bool changed = project;
-            if (project)
+            bool changed = false;
+            double z = MLeaderZ(ml);
+            if (Math.Abs(z) > Tol)
             {
                 Write(ml);
-                // MLeader.Normal is read-only; vertices/text are flattened below.
-                projN++;
+                ml.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -z)));
+                changed = true;
             }
             ArrayList leaders = null;
             try { leaders = ml.GetLeaderIndexes(); } catch (System.Exception) { }
@@ -794,27 +869,124 @@ namespace CadAiDesigner
                 try { lines = ml.GetLeaderLineIndexes(leaderIndex); } catch (System.Exception) { continue; }
                 foreach (int line in Ints(lines))
                 {
-                    int vc;
+                    int vc = 0;
                     try { vc = ml.VerticesCount(line); } catch (System.Exception) { continue; }
                     for (int k = 0; k < vc; k++)
                     {
-                        Point3d p = ml.GetVertex(line, k);
+                        Point3d p;
+                        try { p = ml.GetVertex(line, k); } catch (System.Exception) { continue; }
                         if (Math.Abs(p.Z) <= Tol) continue;
                         Write(ml);
                         ml.SetVertex(line, k, Flat(p));
                         changed = true;
                     }
+                    try
+                    {
+                        Point3d a = ml.GetFirstVertex(line);
+                        if (Math.Abs(a.Z) > Tol) { Write(ml); ml.SetFirstVertex(line, Flat(a)); changed = true; }
+                        Point3d b = ml.GetLastVertex(line);
+                        if (Math.Abs(b.Z) > Tol) { Write(ml); ml.SetLastVertex(line, Flat(b)); changed = true; }
+                    }
+                    catch (System.Exception) { }
                 }
             }
-            if (ml.ContentType == ContentType.MTextContent)
-                changed |= MovePoint(ml, ml.TextLocation, delegate (Point3d p) { ml.TextLocation = p; });
-            else if (ml.ContentType == ContentType.BlockContent)
-                changed |= MovePoint(ml, ml.BlockPosition, delegate (Point3d p) { ml.BlockPosition = p; });
-            else if (ml.ContentType == ContentType.ToleranceContent)
-                changed |= MovePointProp(ml, "ToleranceLocation");
+            try
+            {
+                if (ml.ContentType == ContentType.MTextContent)
+                {
+                    if (Math.Abs(ml.TextLocation.Z) > Tol)
+                    {
+                        Write(ml);
+                        ml.TextLocation = Flat(ml.TextLocation);
+                        changed = true;
+                    }
+                    try
+                    {
+                        MText copy = ml.MText;
+                        if (copy != null && Math.Abs(copy.Location.Z) > Tol)
+                        {
+                            copy.Location = Flat(copy.Location);
+                            Write(ml);
+                            ml.MText = copy;
+                            changed = true;
+                        }
+                    }
+                    catch (System.Exception) { }
+                }
+                else if (ml.ContentType == ContentType.BlockContent && Math.Abs(ml.BlockPosition.Z) > Tol)
+                {
+                    Write(ml);
+                    ml.BlockPosition = Flat(ml.BlockPosition);
+                    changed = true;
+                }
+                else if (ml.ContentType == ContentType.ToleranceContent)
+                    changed |= MovePointProp(ml, "ToleranceLocation");
+                changed |= MovePointProp(ml, "ContentBasePosition");
+            }
+            catch (System.Exception) { }
+            try
+            {
+                if (!IsExactPositiveZ(ml.Normal))
+                {
+                    Write(ml);
+                    ml.TransformBy(Matrix3d.Projection(new Plane(Point3d.Origin, Vector3d.ZAxis), Vector3d.ZAxis));
+                    projN++;
+                    changed = true;
+                }
+            }
+            catch (System.Exception) { }
             if (ApplyElev(ml, ref elevN)) changed = true;
             if (ApplyThick(ml, ref thickN)) changed = true;
             return changed ? 1 : 0;
+        }
+
+        static double MLeaderZ(MLeader ml)
+        {
+            double z = 0;
+            bool got = false;
+            try
+            {
+                PropertyInfo p = typeof(MLeader).GetProperty("ContentBasePosition");
+                if (p != null && p.PropertyType == typeof(Point3d) && p.CanRead)
+                {
+                    z = ((Point3d)p.GetValue(ml, null)).Z;
+                    got = true;
+                }
+            }
+            catch (System.Exception) { }
+            try
+            {
+                if (ml.ContentType == ContentType.MTextContent)
+                {
+                    double tz = ml.TextLocation.Z;
+                    if (!got || Math.Abs(tz) > Math.Abs(z)) z = tz;
+                    got = true;
+                }
+                else if (ml.ContentType == ContentType.BlockContent)
+                {
+                    double bz = ml.BlockPosition.Z;
+                    if (!got || Math.Abs(bz) > Math.Abs(z)) z = bz;
+                    got = true;
+                }
+            }
+            catch (System.Exception) { }
+            try
+            {
+                ArrayList leaders = ml.GetLeaderIndexes();
+                foreach (int li in Ints(leaders))
+                {
+                    ArrayList lines = ml.GetLeaderLineIndexes(li);
+                    foreach (int line in Ints(lines))
+                    {
+                        if (ml.VerticesCount(line) <= 0) continue;
+                        double vz = ml.GetVertex(line, 0).Z;
+                        if (!got || Math.Abs(vz) > Math.Abs(z)) z = vz;
+                        got = true;
+                    }
+                }
+            }
+            catch (System.Exception) { }
+            return z;
         }
 
         static int FlattenLeader(Leader ld, ref int elevN, ref int thickN, ref int projN)
@@ -1021,12 +1193,27 @@ namespace CadAiDesigner
             }
         }
 
-        static string CollectLeftover(Transaction tr, BlockTableRecord space, string spaceLabel, List<ObjectId> blocks)
+        static string CollectLeftover(Transaction tr, Database db)
         {
             int count = 0;
             List<string> samples = new List<string>();
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            BlockTableRecord ms = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
             HashSet<ObjectId> stack = new HashSet<ObjectId>();
-            ScanDeep(tr, space, spaceLabel, Matrix3d.Identity, stack, ref count, samples);
+            ScanDeep(tr, ms, "Model", Matrix3d.Identity, stack, ref count, samples);
+            try
+            {
+                DBDictionary lays = (DBDictionary)tr.GetObject(db.LayoutDictionaryId, OpenMode.ForRead);
+                foreach (DBDictionaryEntry de in lays)
+                {
+                    Layout lay = tr.GetObject(de.Value, OpenMode.ForRead) as Layout;
+                    if (lay == null || lay.ModelType) continue;
+                    BlockTableRecord ps = (BlockTableRecord)tr.GetObject(lay.BlockTableRecordId, OpenMode.ForRead);
+                    stack.Clear();
+                    ScanDeep(tr, ps, lay.LayoutName, Matrix3d.Identity, stack, ref count, samples);
+                }
+            }
+            catch (System.Exception) { }
             if (count == 0) return "Kalan Z'li nesne: 0.";
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
             sb.Append("Kalan Z'li nesne: ").Append(count).Append(".");
@@ -1124,6 +1311,8 @@ namespace CadAiDesigner
                 if (h != null) { z0 = z1 = h.Elevation; return true; }
                 Dimension dim = ent as Dimension;
                 if (dim != null) { z0 = z1 = dim.Elevation; return true; }
+                MLeader ml = ent as MLeader;
+                if (ml != null) { z0 = z1 = MLeaderZ(ml); return true; }
                 RasterImage img = ent as RasterImage;
                 if (img != null) { z0 = z1 = img.Orientation.Origin.Z; return true; }
             }
