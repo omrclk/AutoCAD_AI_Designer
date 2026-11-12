@@ -44,6 +44,7 @@ namespace CadAiDesigner
             string firstErr = null;
             string spaceLabel = "Model";
             string leftover = null;
+            string byBlock = null;
             List<ObjectId> processedBlocks = new List<ObjectId>();
             try
             {
@@ -112,6 +113,7 @@ namespace CadAiDesigner
                             }
                         }
 
+                        EnqueueAllOrdinary(tr, db, blockSeen, blockQueue);
                         FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref blockVisited, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
                         FlattenAllDynamic(tr, db, ref dynDefs, ref dynEnts, ref dynRolled, ref errN, ref firstErr);
                         foreach (KeyValuePair<ObjectId, string> sp in spaces)
@@ -120,6 +122,7 @@ namespace CadAiDesigner
                             ForceInserts(tr, area, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                         }
                         leftover = CollectLeftover(tr, db);
+                        byBlock = ReportRemainingByBlock(tr, db);
                         LogStep("tani", spaceLabel, ObjectId.Null, "SCAN");
                     }
                     finally
@@ -175,6 +178,7 @@ namespace CadAiDesigner
             ed.WriteMessage(msg);
             if (firstErr != null) ed.WriteMessage("\nİlk hata: " + firstErr);
             if (!string.IsNullOrEmpty(leftover)) ed.WriteMessage("\n" + leftover);
+            if (!string.IsNullOrEmpty(byBlock)) ed.WriteMessage("\n" + byBlock);
             if (elevErr != null)
                 ed.WriteMessage("\nELEVATION sistem değişkeni ayarlanamadı: " + elevErr);
             else if (Math.Abs(prevElev) > Tol)
@@ -643,7 +647,18 @@ namespace CadAiDesigner
             return locked;
         }
 
-        /// <summary>Queue an ordinary block definition. Dynamic masters and anonymous copies are not queued.</summary>
+        static void EnqueueAllOrdinary(Transaction tr, Database db, HashSet<ObjectId> seen, Queue<ObjectId> queue)
+        {
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            foreach (ObjectId id in bt)
+            {
+                BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null || btr.IsLayout || IsRealXref(btr) || IsProtectedBlock(btr)) continue;
+                EnqueueDefinition(tr, id, seen, queue);
+            }
+        }
+
+        /// <summary>Queue an ordinary block definition. Dynamic masters and anonymous copies are handled separately.</summary>
         static void EnqueueBlockRef(Transaction tr, BlockReference br, HashSet<ObjectId> seen, Queue<ObjectId> queue)
         {
             if (br == null || IsDynamicRef(br)) return;
@@ -655,19 +670,29 @@ namespace CadAiDesigner
             if (id.IsNull || !id.IsValid || !seen.Add(id)) return;
             BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
             if (btr == null || SkipDefinition(btr))
-            {
-                if (btr != null && IsProtectedBlock(btr))
-                    LogStep("skip dynamic", SafeName(btr), id, "BLOCK");
                 return;
-            }
             queue.Enqueue(id);
         }
 
         static bool SkipDefinition(BlockTableRecord btr)
         {
-            if (btr.IsLayout || btr.IsFromExternalReference || btr.IsDependent) return true;
-            try { if (btr.IsFromOverlayReference) return true; } catch (System.Exception) { }
+            if (btr.IsLayout || IsRealXref(btr)) return true;
             if (IsProtectedBlock(btr)) return true;
+            return false;
+        }
+
+        /// <summary>A live xref. Bound names that contain '$' and no '|' are local and may be edited.</summary>
+        static bool IsRealXref(BlockTableRecord btr)
+        {
+            if (btr == null) return false;
+            string name = "";
+            try { name = btr.Name ?? ""; } catch (System.Exception) { }
+            if (name.Length >= 1 && name[0] == '*') return false;
+            if (name.IndexOf('$') >= 0 && name.IndexOf('|') < 0) return false;
+            if (name.IndexOf('|') >= 0) return true;
+            try { if (btr.IsFromExternalReference) return true; } catch (System.Exception) { }
+            try { if (btr.IsFromOverlayReference) return true; } catch (System.Exception) { }
+            try { if (btr.IsDependent) return true; } catch (System.Exception) { }
             return false;
         }
 
@@ -821,6 +846,33 @@ namespace CadAiDesigner
         /// </summary>
         static void FlattenAllDynamic(Transaction tr, Database db, ref int dynDefs, ref int dynEnts, ref int dynRolled, ref int errN, ref string firstErr)
         {
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            List<ObjectId> masters = new List<ObjectId>();
+            HashSet<ObjectId> claimedAnon = new HashSet<ObjectId>();
+            foreach (ObjectId id in bt)
+            {
+                BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null || btr.IsLayout || IsRealXref(btr)) continue;
+                bool dyn = false;
+                try { dyn = btr.IsDynamicBlock; } catch (System.Exception) { dyn = false; }
+                if (!dyn) continue;
+                masters.Add(id);
+                try
+                {
+                    ObjectIdCollection anon = btr.GetAnonymousBlockIds();
+                    if (anon != null)
+                        foreach (ObjectId aid in anon) claimedAnon.Add(aid);
+                }
+                catch (System.Exception) { }
+            }
+            List<ObjectId> orphanU = new List<ObjectId>();
+            foreach (ObjectId id in bt)
+            {
+                BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null || IsRealXref(btr) || !IsAnonU(btr)) continue;
+                if (claimedAnon.Contains(id)) continue;
+                orphanU.Add(id);
+            }
             List<DynSnap> snaps = CollectDynamicRefs(tr, db);
             Dictionary<ObjectId, List<DynSnap>> groups = new Dictionary<ObjectId, List<DynSnap>>();
             foreach (DynSnap s in snaps)
@@ -834,16 +886,28 @@ namespace CadAiDesigner
                 }
                 list.Add(s);
             }
-            foreach (KeyValuePair<ObjectId, List<DynSnap>> kv in groups)
+            foreach (ObjectId mid in masters)
             {
-                int n = FlattenOneDynamic(tr, kv.Key, kv.Value, ref errN, ref firstErr);
-                if (n < 0) dynRolled++;
-                else
-                {
-                    if (n > 0) dynDefs++;
-                    dynEnts += n;
-                }
+                List<DynSnap> list;
+                if (!groups.TryGetValue(mid, out list)) list = new List<DynSnap>();
+                FlattenOneDynamic(tr, mid, list, true, ref dynDefs, ref dynEnts, ref dynRolled, ref errN, ref firstErr);
             }
+            foreach (ObjectId uid in orphanU)
+            {
+                List<DynSnap> list = new List<DynSnap>();
+                foreach (DynSnap s in snaps)
+                {
+                    if (s != null && (s.MasterId == uid || s.RefId == uid)) list.Add(s);
+                }
+                FlattenOneDynamic(tr, uid, list, false, ref dynDefs, ref dynEnts, ref dynRolled, ref errN, ref firstErr);
+            }
+        }
+
+        static bool IsAnonU(BlockTableRecord btr)
+        {
+            string name = "";
+            try { name = btr.Name ?? ""; } catch (System.Exception) { return false; }
+            return name.Length >= 2 && name[0] == '*' && (name[1] == 'U' || name[1] == 'u');
         }
 
         static List<DynSnap> CollectDynamicRefs(Transaction tr, Database db)
@@ -854,9 +918,7 @@ namespace CadAiDesigner
             foreach (ObjectId bid in bt)
             {
                 BlockTableRecord btr = tr.GetObject(bid, OpenMode.ForRead) as BlockTableRecord;
-                if (btr == null) continue;
-                if (btr.IsFromExternalReference || btr.IsDependent) continue;
-                try { if (btr.IsFromOverlayReference) continue; } catch (System.Exception) { }
+                if (btr == null || IsRealXref(btr)) continue;
                 foreach (ObjectId eid in btr)
                 {
                     if (!eid.IsValid || eid.IsErased) continue;
@@ -963,7 +1025,7 @@ namespace CadAiDesigner
             return false;
         }
 
-        static int FlattenOneDynamic(Transaction tr, ObjectId masterId, List<DynSnap> snaps, ref int errN, ref string firstErr)
+        static int FlattenOneDynamic(Transaction tr, ObjectId masterId, List<DynSnap> snaps, bool withCopies, ref int dynDefs, ref int dynEnts, ref int dynRolled, ref int errN, ref string firstErr)
         {
             string name = masterId.Handle.ToString();
             Database db = null;
@@ -971,7 +1033,7 @@ namespace CadAiDesigner
             {
                 BlockTableRecord pre = tr.GetObject(masterId, OpenMode.ForRead) as BlockTableRecord;
                 if (pre != null) name = SafeName(pre);
-                if (pre == null || pre.IsFromExternalReference || pre.IsDependent) return 0;
+                if (pre == null || IsRealXref(pre)) return 0;
                 db = pre.Database;
             }
             catch (System.Exception) { return 0; }
@@ -980,25 +1042,35 @@ namespace CadAiDesigner
             try
             {
                 sub = db.TransactionManager.StartTransaction();
-                int n = FlattenDefZ(sub, masterId);
-                BlockTableRecord master = sub.GetObject(masterId, OpenMode.ForRead) as BlockTableRecord;
-                if (master != null)
+                List<ObjectId> parts = new List<ObjectId>();
+                List<int> counts = new List<int>();
+                parts.Add(masterId);
+                counts.Add(FlattenDefZ(sub, masterId));
+                if (withCopies)
                 {
+                    BlockTableRecord master = sub.GetObject(masterId, OpenMode.ForRead) as BlockTableRecord;
                     ObjectIdCollection anon = null;
-                    try { anon = master.GetAnonymousBlockIds(); } catch (System.Exception) { anon = null; }
+                    try { if (master != null) anon = master.GetAnonymousBlockIds(); } catch (System.Exception) { anon = null; }
                     if (anon != null)
                     {
                         foreach (ObjectId aid in anon)
-                            n += FlattenDefZ(sub, aid);
+                        {
+                            parts.Add(aid);
+                            counts.Add(FlattenDefZ(sub, aid));
+                        }
                     }
                 }
-                foreach (DynSnap s in snaps) RestoreDynSnap(sub, s);
+                if (snaps != null)
+                    foreach (DynSnap s in snaps) RestoreDynSnap(sub, s);
                 bool shifted = false;
-                foreach (DynSnap s in snaps)
+                if (snaps != null)
                 {
-                    BlockReference br = sub.GetObject(s.RefId, OpenMode.ForRead) as BlockReference;
-                    if (br == null) continue;
-                    if (XyMovedRel(s.Xy, SampleRefXY(sub, br))) { shifted = true; break; }
+                    foreach (DynSnap s in snaps)
+                    {
+                        BlockReference br = sub.GetObject(s.RefId, OpenMode.ForRead) as BlockReference;
+                        if (br == null) continue;
+                        if (XyMovedRel(s.Xy, SampleRefXY(sub, br))) { shifted = true; break; }
+                    }
                 }
                 if (shifted)
                 {
@@ -1008,12 +1080,28 @@ namespace CadAiDesigner
                     LogStep("rolled back", name, masterId, "dynamic");
                     if (firstErr == null) firstErr = "dynamic-xy-shift " + name;
                     errN++;
+                    dynRolled++;
                     return -1;
                 }
                 sub.Commit();
                 closed = true;
-                LogStep("fixed dynamic", name, masterId, "n=" + n);
-                return n;
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    string partName = name;
+                    if (i > 0)
+                    {
+                        try
+                        {
+                            BlockTableRecord pb = tr.GetObject(parts[i], OpenMode.ForRead) as BlockTableRecord;
+                            if (pb != null) partName = SafeName(pb);
+                        }
+                        catch (System.Exception) { partName = parts[i].Handle.ToString(); }
+                    }
+                    LogStep("fixed dynamic", partName, parts[i], "n=" + counts[i]);
+                    dynDefs++;
+                    dynEnts += counts[i];
+                }
+                return counts.Count;
             }
             catch (System.Exception ex)
             {
@@ -1025,6 +1113,7 @@ namespace CadAiDesigner
                 LogStep("failed dynamic-xy-shift", name, masterId, "rolled back " + ex.Message);
                 LogStep("rolled back", name, masterId, "dynamic");
                 NoteErr(ref errN, ref firstErr, "dynamic " + name, ex);
+                dynRolled++;
                 return -1;
             }
             finally
@@ -1082,8 +1171,19 @@ namespace CadAiDesigner
         {
             BlockTableRecord btr = tr.GetObject(btrId, OpenMode.ForRead) as BlockTableRecord;
             if (btr == null) return 0;
-            if (btr.IsFromExternalReference || btr.IsDependent || btr.IsLayout) return 0;
+            if (btr.IsLayout || IsRealXref(btr)) return 0;
             int n = 0;
+            try
+            {
+                Point3d org = btr.Origin;
+                if (Math.Abs(org.Z) > Tol)
+                {
+                    Write(btr);
+                    btr.Origin = new Point3d(org.X, org.Y, 0.0);
+                    n++;
+                }
+            }
+            catch (System.Exception) { }
             foreach (ObjectId id in btr)
             {
                 if (!id.IsValid || id.IsErased) continue;
@@ -1100,19 +1200,7 @@ namespace CadAiDesigner
         static bool DropEntityZ(Entity ent)
         {
             BlockReference br = ent as BlockReference;
-            if (br != null)
-            {
-                if (Math.Abs(br.Position.Z) <= Tol) return false;
-                Point2d xy = new Point2d(br.Position.X, br.Position.Y);
-                Write(br);
-                br.Position = new Point3d(br.Position.X, br.Position.Y, 0.0);
-                if (RelFar(xy.X, br.Position.X) || RelFar(xy.Y, br.Position.Y))
-                {
-                    br.Position = new Point3d(xy.X, xy.Y, br.Position.Z);
-                    return false;
-                }
-                return true;
-            }
+            if (br != null) return DropInsertInDef(br);
             double z;
             bool uniform;
             if (!TryWorldZ(ent, out z, out uniform) || !uniform || Math.Abs(z) <= Tol) return false;
@@ -1124,6 +1212,36 @@ namespace CadAiDesigner
             {
                 ent.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, z)));
                 return false;
+            }
+            return true;
+        }
+
+        static bool DropInsertInDef(BlockReference br)
+        {
+            Vector3d n = Vector3d.ZAxis;
+            try { n = br.Normal; } catch (System.Exception) { }
+            bool badZ = Math.Abs(br.Position.Z) > Tol;
+            bool down = IsNearNegativeZ(n);
+            bool tilted = !down && !IsNearPositiveZ(n) && !IsExactPositiveZ(n);
+            if (!badZ && !down && !tilted) return false;
+            double x = br.Position.X, y = br.Position.Y;
+            Write(br);
+            if (down)
+            {
+                double c = br.Position.Z * 0.5;
+                try { br.TransformBy(Matrix3d.Mirroring(new Plane(new Point3d(0.0, 0.0, c), Vector3d.ZAxis))); }
+                catch (System.Exception) { br.Position = new Point3d(x, y, 0.0); }
+            }
+            else if (tilted)
+            {
+                try { br.TransformBy(Matrix3d.Projection(new Plane(Point3d.Origin, Vector3d.ZAxis), Vector3d.ZAxis)); }
+                catch (System.Exception) { br.Position = new Point3d(x, y, 0.0); }
+            }
+            else
+                br.Position = new Point3d(x, y, 0.0);
+            if (RelFar(x, br.Position.X) || RelFar(y, br.Position.Y))
+            {
+                try { br.Position = new Point3d(x, y, 0.0); } catch (System.Exception) { }
             }
             return true;
         }
@@ -1315,14 +1433,12 @@ namespace CadAiDesigner
         static int FlattenLine(Line ln, ref int elevN, ref int thickN)
         {
             Point3d a = ln.StartPoint, b = ln.EndPoint;
-            bool vertical = Math.Abs(a.X - b.X) <= Tol && Math.Abs(a.Y - b.Y) <= Tol && Math.Abs(a.Z - b.Z) > Tol;
-            if (vertical) return 2;
             bool changed = false;
             if (Math.Abs(a.Z) > Tol || Math.Abs(b.Z) > Tol)
             {
                 Write(ln);
-                ln.StartPoint = Flat(a);
-                ln.EndPoint = Flat(b);
+                ln.StartPoint = new Point3d(a.X, a.Y, 0.0);
+                ln.EndPoint = new Point3d(b.X, b.Y, 0.0);
                 changed = true;
             }
             if (ApplyThick(ln, ref thickN)) changed = true;
@@ -2229,6 +2345,59 @@ namespace CadAiDesigner
             return sb.ToString();
         }
 
+        static string ReportRemainingByBlock(Transaction tr, Database db)
+        {
+            List<KeyValuePair<string, int>> rows = new List<KeyValuePair<string, int>>();
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            foreach (ObjectId id in bt)
+            {
+                BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null || btr.IsLayout || IsRealXref(btr)) continue;
+                int c = CountOffZ(tr, btr);
+                if (c > 0) rows.Add(new KeyValuePair<string, int>(SafeName(btr), c));
+            }
+            rows.Sort(delegate (KeyValuePair<string, int> a, KeyValuePair<string, int> b) { return b.Value.CompareTo(a.Value); });
+            if (rows.Count == 0) return "Kalan Z blok: 0.";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append("Kalan Z blok (ilk 10):");
+            int shown = 0;
+            for (int i = 0; i < rows.Count && shown < 10; i++)
+            {
+                sb.Append("\n  ").Append(rows[i].Key).Append(" = ").Append(rows[i].Value);
+                shown++;
+            }
+            return sb.ToString();
+        }
+
+        static int CountOffZ(Transaction tr, BlockTableRecord btr)
+        {
+            int c = 0;
+            try { if (Math.Abs(btr.Origin.Z) > ReportZ) c++; } catch (System.Exception) { }
+            foreach (ObjectId id in btr)
+            {
+                if (!id.IsValid || id.IsErased) continue;
+                Entity ent = null;
+                try { ent = tr.GetObject(id, OpenMode.ForRead) as Entity; }
+                catch (System.Exception) { continue; }
+                if (ent == null || IsDynamicPart(ent)) continue;
+                BlockReference br = ent as BlockReference;
+                if (br != null)
+                {
+                    try { if (Math.Abs(br.Position.Z) > ReportZ) c++; } catch (System.Exception) { }
+                    try
+                    {
+                        Vector3d n = br.Normal;
+                        if (!IsNearPositiveZ(n) && !IsExactPositiveZ(n)) c++;
+                    }
+                    catch (System.Exception) { }
+                    continue;
+                }
+                double z0, z1;
+                if (EntityZ(ent, out z0, out z1) && (Math.Abs(z0) > ReportZ || Math.Abs(z1) > ReportZ)) c++;
+            }
+            return c;
+        }
+
         static void ScanDeep(Transaction tr, BlockTableRecord owner, string path, Matrix3d toWorld, HashSet<ObjectId> stack, ref int count, List<string> samples)
         {
             if (owner == null || !stack.Add(owner.ObjectId)) return;
@@ -2247,7 +2416,7 @@ namespace CadAiDesigner
                         BlockTableRecord def = null;
                         try { def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord; }
                         catch (System.Exception) { def = null; }
-                        if (def != null && !SkipDefinition(def))
+                        if (def != null && !def.IsLayout && !IsRealXref(def))
                         {
                             string child = path + " > " + SafeName(def);
                             try { ScanDeep(tr, def, child, toWorld * br.BlockTransform, stack, ref count, samples); }
