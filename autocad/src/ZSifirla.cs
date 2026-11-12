@@ -2,7 +2,9 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Reflection;
+using System.Text;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.DatabaseServices.Filters;
@@ -24,7 +26,10 @@ namespace CadAiDesigner
     {
         const double Tol = 1e-8;
         const double ReportZ = 1e-6;
-        static int XclipFixed;
+        const double XclipElevTol = 1e-9;
+        static int XclipFixed, XclipErr;
+        static bool DoXclip;
+        static StreamWriter ZLog;
 
         [CommandMethod("ZSIFIRLA", CommandFlags.Modal | CommandFlags.NoBlockEditor | CommandFlags.Redraw)]
         [CommandMethod("AIDZSIFIRLA", CommandFlags.Modal | CommandFlags.NoBlockEditor | CommandFlags.Redraw)]
@@ -34,10 +39,17 @@ namespace CadAiDesigner
             if (doc == null) return;
             Editor ed = doc.Editor;
             Database db = doc.Database;
-
+            bool? xclipAsk = AskXclip(ed);
+            if (xclipAsk == null) return;
+            DoXclip = xclipAsk.Value;
+            XclipFixed = 0;
+            XclipErr = 0;
+            OpenZLog();
+            try
+            {
+            LogStep("basla", DoXclip ? "xclip=evet" : "xclip=hayir", ObjectId.Null, "ZSIFIRLA");
             int fixedN = 0, elevN = 0, thickN = 0, projN = 0, skipN = 0, lockedN = 0, errN = 0, total = 0;
             int blocksN = 0, blockFixed = 0, blockVisited = 0;
-            XclipFixed = 0;
             string firstErr = null;
             string spaceLabel = "Model";
             string leftover = null;
@@ -77,6 +89,7 @@ namespace CadAiDesigner
                             if (!id.IsValid || id.IsErased) continue;
                             Entity ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
                             if (ent == null || ent.IsErased) continue;
+                            LogStep("alan", spaceLabel, id, ent.GetType().Name);
                             total++;
                             bool onLocked = !ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId);
                             if (onLocked) lockedN++;
@@ -101,6 +114,7 @@ namespace CadAiDesigner
                         FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref blockVisited, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
                         ForceInserts(tr, space, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                         leftover = CollectLeftover(tr, space, spaceLabel, processedBlocks);
+                        LogStep("tani", spaceLabel, ObjectId.Null, "SCAN");
                     }
                     finally
                     {
@@ -150,6 +164,7 @@ namespace CadAiDesigner
                 + "XCLIP sınırı düzeltilen: " + XclipFixed + ". "
                 + "Taranan: " + total + ".";
             if (errN > 0) msg += " Hata: " + errN + ".";
+            if (XclipErr > 0) msg += " XCLIP hata: " + XclipErr + ".";
             ed.WriteMessage(msg);
             if (firstErr != null) ed.WriteMessage("\nİlk hata: " + firstErr);
             if (!string.IsNullOrEmpty(leftover)) ed.WriteMessage("\n" + leftover);
@@ -163,6 +178,56 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nUCS Dünya değil; orijin Z = " + Fmt(UcsOriginZ(ed)) + " (UCS değiştirilmedi).");
             ed.WriteMessage("\n");
             try { ed.Regen(); } catch (System.Exception) { }
+            LogStep("bitti", spaceLabel, ObjectId.Null, "ZSIFIRLA");
+            }
+            finally { CloseZLog(); }
+        }
+
+        static bool? AskXclip(Editor ed)
+        {
+            PromptKeywordOptions ko = new PromptKeywordOptions("\nXCLIP sınırları da düzeltilsin mi [Evet/Hayır] <Evet>: ");
+            ko.AllowNone = true;
+            ko.Keywords.Add("Evet");
+            ko.Keywords.Add("Hayir");
+            PromptResult r = ed.GetKeywords(ko);
+            if (r.Status == PromptStatus.Cancel) return null;
+            if (r.Status == PromptStatus.OK && string.Equals(r.StringResult, "Hayir", StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
+
+        static void OpenZLog()
+        {
+            try
+            {
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CadAiDesigner");
+                Directory.CreateDirectory(dir);
+                ZLog = new StreamWriter(Path.Combine(dir, "zsifirla.log"), false, new UTF8Encoding(false));
+                ZLog.AutoFlush = true;
+            }
+            catch (System.Exception) { ZLog = null; }
+        }
+
+        static void CloseZLog()
+        {
+            try
+            {
+                if (ZLog != null) { ZLog.Flush(); ZLog.Dispose(); }
+            }
+            catch (System.Exception) { }
+            ZLog = null;
+        }
+
+        static void LogStep(string phase, string blockName, ObjectId id, string type)
+        {
+            try
+            {
+                if (ZLog == null) return;
+                string handle = "";
+                try { if (!id.IsNull) handle = id.Handle.ToString(); } catch (System.Exception) { }
+                ZLog.WriteLine(phase + "\t" + (blockName ?? "") + "\t" + handle + "\t" + (type ?? ""));
+                ZLog.Flush();
+            }
+            catch (System.Exception) { }
         }
 
         static void NoteErr(ref int errN, ref string firstErr, Entity ent, System.Exception ex)
@@ -269,6 +334,7 @@ namespace CadAiDesigner
                 if (btr == null || SkipDefinition(btr)) continue;
                 blocksN++;
                 processed.Add(bid);
+                LogStep("tanim", SafeName(btr), bid, "BLOCK");
                 Write(btr);
                 int fixedHere = 0;
                 try
@@ -290,6 +356,7 @@ namespace CadAiDesigner
                     catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok varlığı", ex); continue; }
                     if (ent == null || ent.IsErased) continue;
                     blockVisited++;
+                    LogStep("blok", SafeName(btr), eid, ent.GetType().Name);
                     if (!ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId)) lockedN++;
                     try
                     {
@@ -1018,8 +1085,8 @@ namespace CadAiDesigner
                     BlockReference br = ent as BlockReference;
                     if (br != null)
                     {
-                        string xref = XclipLine(tr, br, path, toWorld);
-                        if (xref != null) AddSample(ref count, samples, xref);
+                        string clip = XclipLine(tr, br, path);
+                        if (clip != null) AddSample(ref count, samples, clip);
                         BlockTableRecord def = null;
                         try { def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord; }
                         catch (System.Exception) { def = null; }
@@ -1029,27 +1096,20 @@ namespace CadAiDesigner
                             try { ScanDeep(tr, def, child, toWorld * br.BlockTransform, stack, ref count, samples); }
                             catch (System.Exception) { }
                         }
+                        double pz = 0;
+                        try { pz = br.Position.Z; } catch (System.Exception) { }
+                        if (Math.Abs(pz) > ReportZ)
+                            AddSample(ref count, samples, path + " > INSERT " + (def != null ? SafeName(def) : "") + ", katman " + br.Layer + ", Position Z " + Fmt(pz));
+                        continue;
                     }
-                    Extents3d ex;
-                    try { ex = ent.GeometricExtents; }
-                    catch (System.Exception) { continue; }
-                    double minZ, maxZ;
-                    if (!WorldSpan(ex, toWorld, out minZ, out maxZ)) continue;
-                    if (Math.Abs(minZ) <= ReportZ && Math.Abs(maxZ) <= ReportZ) continue;
+                    double z0, z1;
+                    if (!EntityZ(ent, out z0, out z1)) continue;
+                    if (Math.Abs(z0) <= ReportZ && Math.Abs(z1) <= ReportZ) continue;
                     string type = ent.GetType().Name;
                     try { string dxf = ent.GetRXClass().DxfName; if (!string.IsNullOrEmpty(dxf)) type = dxf; } catch (System.Exception) { }
                     string layer = "";
                     try { layer = ent.Layer; } catch (System.Exception) { }
-                    string line = path + " > " + type + ", katman " + layer + ", Z " + Fmt(minZ) + " .. " + Fmt(maxZ);
-                    if (br != null)
-                    {
-                        try
-                        {
-                            BlockTableRecord def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                            if (def != null) line += " (referans " + SafeName(def) + ")";
-                        }
-                        catch (System.Exception) { }
-                    }
+                    string line = path + " > " + type + ", katman " + layer + ", Z " + Fmt(z0) + " .. " + Fmt(z1);
                     AddSample(ref count, samples, line);
                 }
             }
@@ -1070,136 +1130,111 @@ namespace CadAiDesigner
             catch (System.Exception) { return "?"; }
         }
 
-        static bool WorldSpan(Extents3d ex, Matrix3d toWorld, out double minZ, out double maxZ)
+        /// <summary>XCLIP frame still off Z=0. Reads only the definition, never the clip matrices or extents.</summary>
+        static string XclipLine(Transaction tr, BlockReference br, string path)
         {
-            minZ = 0;
-            maxZ = 0;
             try
             {
-                Point3d a = ex.MinPoint, b = ex.MaxPoint;
-                Point3d[] corners = new Point3d[]
+                SpatialFilter sf = OpenSpatial(tr, br, false);
+                if (sf == null) return null;
+                SpatialFilterDefinition def = sf.Definition;
+                Point2dCollection pts = null;
+                try { pts = def.GetPoints(); } catch (System.Exception) { pts = null; }
+                if (pts == null || pts.Count < 2) return null;
+                if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= XclipElevTol) return null;
+                string name = path;
+                try
                 {
-                    new Point3d(a.X, a.Y, a.Z), new Point3d(b.X, a.Y, a.Z), new Point3d(a.X, b.Y, a.Z), new Point3d(b.X, b.Y, a.Z),
-                    new Point3d(a.X, a.Y, b.Z), new Point3d(b.X, a.Y, b.Z), new Point3d(a.X, b.Y, b.Z), new Point3d(b.X, b.Y, b.Z)
-                };
-                minZ = double.MaxValue;
-                maxZ = double.MinValue;
-                for (int i = 0; i < corners.Length; i++)
-                {
-                    double z = corners[i].TransformBy(toWorld).Z;
-                    if (z < minZ) minZ = z;
-                    if (z > maxZ) maxZ = z;
+                    BlockTableRecord defb = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                    if (defb != null) name = path + " > " + SafeName(defb);
                 }
-                return true;
+                catch (System.Exception) { }
+                return "XCLIP " + name + ", katman " + br.Layer + ", elev " + Fmt(def.Elevation);
             }
-            catch (System.Exception) { return false; }
-        }
-
-        /// <summary>World Z of an XCLIP frame. Null when the filter is absent or already on Z=0.</summary>
-        static string XclipLine(Transaction tr, BlockReference br, string path, Matrix3d ownerToWorld)
-        {
-            SpatialFilter sf = OpenSpatial(tr, br, false);
-            if (sf == null) return null;
-            SpatialFilterDefinition def;
-            try { def = sf.Definition; }
             catch (System.Exception) { return null; }
-            double minZ, maxZ;
-            bool measured = XclipWorldZ(br, sf, def, ownerToWorld, out minZ, out maxZ);
-            bool bad = !IsExactPositiveZ(def.Normal) || Math.Abs(def.Elevation) > Tol || FilterHasZ(sf) || (measured && (Math.Abs(minZ) > ReportZ || Math.Abs(maxZ) > ReportZ));
-            if (!bad) return null;
-            string name = path;
-            try
-            {
-                BlockTableRecord defb = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
-                if (defb != null) name = path + " > " + SafeName(defb);
-            }
-            catch (System.Exception) { }
-            string z = measured ? (", Z " + Fmt(minZ) + " .. " + Fmt(maxZ)) : "";
-            return "XCLIP " + name + ", katman " + br.Layer + ", elev " + Fmt(def.Elevation) + z;
         }
 
-        static bool XclipWorldZ(BlockReference br, SpatialFilter sf, SpatialFilterDefinition def, Matrix3d ownerToWorld, out double minZ, out double maxZ)
+        static bool EntityZ(Entity ent, out double z0, out double z1)
         {
-            minZ = 0;
-            maxZ = 0;
+            z0 = 0;
+            z1 = 0;
             try
             {
-                Point2dCollection pts = def.GetPoints();
-                if (pts == null || pts.Count == 0) return false;
-                Matrix3d clipToWcs = sf.ClipSpaceToWorldCoordinateSystemTransform;
-                Matrix3d inverse = sf.OriginalInverseBlockTransform;
-                Matrix3d blockToWorld = ownerToWorld * br.BlockTransform;
-                Matrix3d toWorld;
-                try { toWorld = blockToWorld * inverse.Inverse() * clipToWcs; }
-                catch (System.Exception) { toWorld = blockToWorld * clipToWcs; }
-                minZ = double.MaxValue;
-                maxZ = double.MinValue;
-                foreach (Point2d p in pts)
-                {
-                    double z = new Point3d(p.X, p.Y, def.Elevation).TransformBy(toWorld).Z;
-                    if (z < minZ) minZ = z;
-                    if (z > maxZ) maxZ = z;
-                }
-                return true;
+                Line ln = ent as Line;
+                if (ln != null) { z0 = Math.Min(ln.StartPoint.Z, ln.EndPoint.Z); z1 = Math.Max(ln.StartPoint.Z, ln.EndPoint.Z); return true; }
+                Polyline pl = ent as Polyline;
+                if (pl != null) { z0 = z1 = pl.Elevation; return true; }
+                Polyline2d p2 = ent as Polyline2d;
+                if (p2 != null) { z0 = z1 = p2.Elevation; return true; }
+                Circle c = ent as Circle;
+                if (c != null) { z0 = z1 = c.Center.Z; return true; }
+                Ellipse el = ent as Ellipse;
+                if (el != null) { z0 = z1 = el.Center.Z; return true; }
+                DBPoint pt = ent as DBPoint;
+                if (pt != null) { z0 = z1 = pt.Position.Z; return true; }
+                DBText tx = ent as DBText;
+                if (tx != null) { z0 = z1 = tx.Position.Z; return true; }
+                MText mt = ent as MText;
+                if (mt != null) { z0 = z1 = mt.Location.Z; return true; }
+                Hatch h = ent as Hatch;
+                if (h != null) { z0 = z1 = h.Elevation; return true; }
+                Dimension dim = ent as Dimension;
+                if (dim != null) { z0 = z1 = dim.Elevation; return true; }
+                RasterImage img = ent as RasterImage;
+                if (img != null) { z0 = z1 = img.Orientation.Origin.Z; return true; }
             }
             catch (System.Exception) { return false; }
+            return false;
         }
 
         static bool FlattenXclip(Transaction tr, BlockReference br)
         {
-            SpatialFilter sf = OpenSpatial(tr, br, false);
-            if (sf == null) return false;
-            SpatialFilterDefinition def = sf.Definition;
-            Point2dCollection src = def.GetPoints();
-            if (src == null || src.Count < 2) return false;
-            if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= Tol && !FilterHasZ(sf)) return false;
-            if (!sf.IsWriteEnabled) sf.UpgradeOpen();
-            Point2dCollection pts = new Point2dCollection();
-            foreach (Point2d p in src) pts.Add(p);
-            bool enabled = true;
-            try { enabled = def.Enabled; } catch (System.Exception) { }
-            if (!TryAssignDefinition(sf, pts, enabled))
-                ReplaceSpatialFilter(tr, br, sf, pts, enabled);
-            else if (FilterHasZ(sf))
-                ReplaceSpatialFilter(tr, br, sf, pts, enabled);
-            try { if (!br.IsWriteEnabled) br.UpgradeOpen(); br.RecordGraphicsModified(true); } catch (System.Exception) { }
-            return true;
-        }
-
-        static bool TryAssignDefinition(SpatialFilter sf, Point2dCollection pts, bool enabled)
-        {
-            try
-            {
-                sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, double.PositiveInfinity, double.NegativeInfinity, enabled);
-                return true;
-            }
-            catch (System.Exception)
+            if (!DoXclip || br == null) return false;
+            LogStep("xclip", "", br.ObjectId, "INSERT");
+            Database db = null;
+            try { db = br.Database; } catch (System.Exception) { return false; }
+            if (db == null) return false;
+            using (Transaction sub = db.TransactionManager.StartTransaction())
             {
                 try
                 {
-                    sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, 1e99, -1e99, enabled);
+                    BlockReference cur = (BlockReference)sub.GetObject(br.ObjectId, OpenMode.ForRead);
+                    if (IsXrefRef(sub, cur)) { sub.Commit(); return false; }
+                    SpatialFilter sf = OpenSpatial(sub, cur, false);
+                    if (sf == null) { sub.Commit(); return false; }
+                    SpatialFilterDefinition def = sf.Definition;
+                    Point2dCollection src = def.GetPoints();
+                    if (src == null || src.Count < 2) { sub.Commit(); return false; }
+                    if (IsExactPositiveZ(def.Normal) && Math.Abs(def.Elevation) <= XclipElevTol) { sub.Commit(); return false; }
+                    Point2dCollection pts = new Point2dCollection();
+                    foreach (Point2d p in src) pts.Add(new Point2d(p.X, p.Y));
+                    double front = def.FrontClip;
+                    double back = def.BackClip;
+                    bool enabled = def.Enabled;
+                    if (!sf.IsWriteEnabled) sf.UpgradeOpen();
+                    sf.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, front, back, enabled);
+                    try { cur.RecordGraphicsModified(true); } catch (System.Exception) { }
+                    sub.Commit();
                     return true;
                 }
-                catch (System.Exception) { return false; }
+                catch (System.Exception ex)
+                {
+                    XclipErr++;
+                    LogStep("xclip-hata", ex.GetType().Name, br.ObjectId, ex.Message);
+                    return false;
+                }
             }
         }
 
-        static void ReplaceSpatialFilter(Transaction tr, BlockReference br, SpatialFilter oldFilter, Point2dCollection pts, bool enabled)
+        static bool IsXrefRef(Transaction tr, BlockReference br)
         {
-            if (br.ExtensionDictionary.IsNull) return;
-            DBDictionary ext = tr.GetObject(br.ExtensionDictionary, OpenMode.ForRead) as DBDictionary;
-            if (ext == null || !ext.Contains("ACAD_FILTER")) return;
-            DBDictionary filters = tr.GetObject(ext.GetAt("ACAD_FILTER"), OpenMode.ForRead) as DBDictionary;
-            if (filters == null) return;
-            if (!filters.IsWriteEnabled) filters.UpgradeOpen();
-            filters.Remove("SPATIAL");
-            if (!oldFilter.IsWriteEnabled) oldFilter.UpgradeOpen();
-            oldFilter.Erase();
-            SpatialFilter neu = new SpatialFilter();
-            if (!TryAssignDefinition(neu, pts, enabled))
-                neu.Definition = new SpatialFilterDefinition(pts, Vector3d.ZAxis, 0.0, 0.0, 0.0, enabled);
-            filters.SetAt("SPATIAL", neu);
-            tr.AddNewlyCreatedDBObject(neu, true);
+            try
+            {
+                BlockTableRecord b = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                if (b == null) return false;
+                return b.IsFromExternalReference || b.IsDependent;
+            }
+            catch (System.Exception) { return false; }
         }
 
         static SpatialFilter OpenSpatial(Transaction tr, BlockReference br, bool forWrite)
@@ -1214,23 +1249,6 @@ namespace CadAiDesigner
                 return tr.GetObject(filters.GetAt("SPATIAL"), forWrite ? OpenMode.ForWrite : OpenMode.ForRead) as SpatialFilter;
             }
             catch (System.Exception) { return null; }
-        }
-
-        static bool FilterHasZ(SpatialFilter sf)
-        {
-            try
-            {
-                if (Math.Abs(Tz(sf.OriginalInverseBlockTransform)) > Tol) return true;
-                if (Math.Abs(Tz(sf.ClipSpaceToWorldCoordinateSystemTransform)) > Tol) return true;
-            }
-            catch (System.Exception) { }
-            return false;
-        }
-
-        static double Tz(Matrix3d m)
-        {
-            try { return m.CoordinateSystem3d.Origin.Z; }
-            catch (System.Exception) { return m[2, 3]; }
         }
 
         static int FlattenImage(RasterImage img, ref int projN)
