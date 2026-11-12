@@ -201,3 +201,17 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+
+## Z=0 (ZSIFIRLA / AIDZSIFIRLA)
+
+Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
+
+Geçerli alan, Model ve bütün paftalar tek işlemde WCS Z=0 yapılır. Sıradan blok tanımlarının hepsi (dinamik ustanın içindeki sıradan bloklar dahil) düzlenir. `Xref_...$0$...` bağlı xref adları düzenlenir; açık xref (`|` veya IsFromExternalReference) atlanır. Dinamik ustanın ve `*U` kopyasının içindeki geometri ile iç insert'in Position Z / normali yalnız Z yönünde düzeltilir; Origin Z de 0 yapılır. Plan kayarsa o tanım geri alınır. LW polyline Elevation her zaman 0 yazılır. Eski Leader normali `-Z` ise yatay düzlemde aynalanır: plan XY durur, normal `+Z` olur. Döndürme yapılmaz. İşlemden sonra bir noktanın XY'si 1e-6'dan fazla kayarsa o nesne geri alınır. Blok referansının ekleme Z değeri sıfırlanır; dinamik insert'te yalnız Position Z yazılır. XCLIP sınırına dokunulmaz.
+
+- Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
+- LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali tam `-Z` olan polyline yatay aynayla çevrilir, plan XY değişmez.
+- Yay, çember, elips, yazı, blok, ölçü, tarama ve multileader: normal `+Z`, WCS XY korunur. Eğik olanlar da atlanmaz.
+- Kilitli katmanlar işlem sırasında açılır, bitince yeniden kilitlenir. Özet, kilitli katmandaki adedi ve normali düzlenen adedi yazar. İlk hata komut satırına basılır.
+- Çizimin `ELEVATION` sistem değişkeni 0 yapılır. UCS Dünya değilse özet, UCS orijininin Z değerini yazar (UCS değiştirilmez).
+- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, normali düzlenen, atlanan düşey, kilitli katman, blok tanımı ve blok içi düzeltilen. Tek UNDO.

@@ -46,6 +46,7 @@
     <Compile Include="src\HatchDiag.cs" />
     <Compile Include="src\RefPoints.cs" />
     <Compile Include="src\Olcu.cs" />
+    <Compile Include="src\ZSifirla.cs" />
     <Compile Include="src\Fittings.cs" />
     <Compile Include="src\Targets.cs" />
     <Compile Include="src\Preview.cs" />
