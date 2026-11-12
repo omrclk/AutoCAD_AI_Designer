@@ -18,7 +18,7 @@ namespace CadAiDesigner
         readonly TextBox prompt = new TextBox();
         readonly Label status = new Label();
         readonly Button btnSelect = new Button(), btnAsk = new Button(), btnApply = new Button(),
-                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
+                        btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button(), btnUzunluk = new Button();
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = 8000000, RecursionLimit = 40 };
         string session = Guid.NewGuid().ToString("N");
         bool busy, warnedSel;
@@ -74,10 +74,11 @@ namespace CadAiDesigner
             Setup(btnAyd, "Aydınlatma hesabı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Aydınlatma hesabı: oda/koridor polyline'ını (veya iç nokta) ve armatürleri seçin; H, Φ, MF, yansımalar sorulur. Eort lümen yöntemi, Uo yaklaşık."); d.SendStringToExecute("AIDAYDHESAP ", true, false, false); } });
             Setup(btnArm, "Armatür yerleşimi", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Armatür yerleşimi: armatür bloğunu tıklayın, sonra açık (koridor: tek sıra) / kapalı (oda: grid) polyline'ları seçin, x mesafesini girin veya iki nokta tıklayın. Uç/duvar = x, aralık = 2x."); d.SendStringToExecute("AIDARMATUR ", true, false, false); } });
             Setup(btnMetraj, "Metraj", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Metraj: AutoCAD komut satırındaki soruları yanıtlayın (Enter = varsayılan)."); d.SendStringToExecute("AIDMETRAJ ", true, false, false); } });
+            Setup(btnUzunluk, "Hat uzunluğu", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Hat uzunluğu: eğrileri seçin. Üst üste binen hatlar bir kez sayılır; çizim değişmez."); d.SendStringToExecute("AIDUZUNLUK ", true, false, false); } });
             btnApply.Enabled = false; btnCancel.Enabled = false;
 
             FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0) };
-            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir });
+            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir, btnUzunluk });
             Label tip = new Label
             {
                 Dock = DockStyle.Fill, AutoSize = false, Height = 48, AutoEllipsis = true, ForeColor = SystemColors.GrayText, Padding = new Padding(0, 6, 0, 0),

@@ -201,3 +201,13 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+## Hat uzunluğu (AIDUZUNLUK / UZT)
+
+Panelde **Hat uzunluğu** veya komut satırında `AIDUZUNLUK` / `UZT`. Seçilen hatların net uzunluğunu verir; üst üste binen ve aynı doğrultudaki parçalar **bir kez** sayılır. Çizim değişmez.
+
+- Türler: çizgi, polyline (yay ve bulge dahil), Polyline2d (curve/spline-fit), Polyline3d, yay, daire, elips (kısmi dahil), spline. Ray ve Xline sonsuzdur, atlanır ve raporlanır. Eğri olmayan nesneler atlanır.
+- `Bloklar [Evet/Hayir] <Hayir>`: Evet ise bloklar sanal olarak patlatılır (iç içe bloklar dahil). Geçici kopyalar atılır; çizime bir şey yazılmaz.
+- `Tolerans <0,001>`: aynı doğru veya aynı daire kabulü (çizim birimi, açı 1e-6 rad). Değer `%LOCALAPPDATA%\CadAiDesigner\uzunluk.json` içinde hatırlanır.
+- Uzunluk 3 boyutludur. Çakışmayan eğride tam uzunluk kullanılır; çakışan doğrular ve yaylar birleştirilir; aynı spline veya elips bir kez sayılır.
+- Komut satırı: tipe göre adet, atlanan, ham toplam, çakışan uzunluk, **net hat uzunluğu**, katman netleri (önce katman içi, sonra genel net). INSUNITS mm → /1000, cm → /100, m → 1; tanımsızsa yalnız çizim birimi (Türkçe virgül, 2 ondalık). Özet panoya kopyalanır.
