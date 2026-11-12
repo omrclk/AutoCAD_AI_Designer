@@ -1,4 +1,5 @@
-﻿import os
+﻿import base64
+import os
 import sys
 import tempfile
 import unittest
@@ -63,6 +64,43 @@ class TestAttrExport(unittest.TestCase):
             self.assertEqual(tum[1][ti][1], 'MLEADER')
             self.assertEqual(tum[1][tip][1], 'N2XH')
             self.assertEqual(tum[2][ti][1], 'BLOK')
+
+    def test_resim_column_reused_across_sheets(self):
+        png = base64.b64decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+        blocks = [B('etiket', '1A', PANO='P1', ADET='2'), B('etiket', '1B', PANO='P2', ADET='3'), B('baska', '2A', NOT='x')]
+        blocks[0]['resim'] = blocks[1]['resim'] = 'same'
+        blocks[2]['resim'] = 'other'
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 'a_attribute.xlsx')
+            r = attrexport.export({'blocks': blocks, 'export_path': p, 'images': {'same': png, 'other': png, 'nope': 'xx'}})
+            self.assertIn('Blok resimleri: 2 önizleme', r['summary'])
+            sheets = __import__('attrimport').read_sheets(p)
+            tum = [rows for name, rows in sheets if name == 'Tümü'][0]
+            head = [c[1] for c in tum[0]]
+            self.assertEqual(head[:3], ['Blok', 'Resim', 'Tip'])
+            self.assertEqual(tum[1][0][1], 'etiket')
+            self.assertEqual(tum[-1][0][1], 'TOPLAM')
+            with zipfile.ZipFile(p) as z:
+                media = [n for n in z.namelist() if n.startswith('xl/media/')]
+                self.assertEqual(len(media), 2)
+                # Tümü + two block sheets; Özet is absent
+                drawings = [n for n in z.namelist() if n.startswith('xl/drawings/drawing')]
+                self.assertEqual(len(drawings), 3)
+            __import__('metraj').validate_package(p)
+            diff = __import__('attrimport').diff({'path': p, 'blocks': blocks})
+            self.assertEqual(diff['changes'], [])
+
+    def test_no_images_keeps_columns(self):
+        rows, _ = attrexport._rows([B('e', '1', A='5')], ['A'])
+        self.assertNotIn('Resim', rows[0])
+
+    def test_resim_header_is_not_an_attribute(self):
+        import attrimport
+        self.assertTrue(attrimport._meta('Resim'))
+        self.assertTrue(attrimport._meta('Tip'))
+        self.assertFalse(attrimport._meta('RESIM'))
+        self.assertFalse(attrimport._meta('TIP'))
 
     def test_no_blocks(self):
         with self.assertRaises(ValueError):

@@ -201,3 +201,12 @@ Panel: **Oda blok sayımı**. Varsayılan: **tek pencere seçimi** (kapalı poly
 ## Oda sınırı (AIDODASINIR / OSINIR)
 
 Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (mahal etiketi, 1200 mm boşluk). Her oda için kapalı LWPOLYLINE katman ``A_ODA_SINIR`` (yoksa oluşturulur, yeşil); oda adı XData ``CADAI_ODA``. Aynı sınır varsa atlar. Tek UNDO.
+
+## Blok resimleri (Excel)
+
+`AIDMETRAJ`, `AIDPLANKESIF` ve `AIDATTEXPORT` Excel dosyalarına blok önizlemesi ekler. Soru: `Resim ekle [Evet/Hayir] <Evet>` (Enter = Evet). Hayır derseniz sütun eklenmez; dosyanın geri kalanı eskisi gibi kalır. Panelden veya yapay zekâdan başlayan aktarımda resim varsayılan olarak açıktır.
+
+- Önizleme blok tanımının geometrisinden üretilir (çizgi, yay, daire, polyline, elips, spline, iç içe blok, isteğe bağlı tarama sınırı). Dinamik blokta referansın anonim tanımı kullanılır; böylece görünürlük ve gerilme yansır. Toplu metraj satırında aynı kalemin ilk örneği yeterlidir. Geometri boşsa `PreviewIcon` denenir.
+- Sütun adı **Resim**. Aynı blok bir kez çizilir ve Excel'de tek resim olarak paylaşılır. Satır yüksekliği yaklaşık 75 pt.
+- Metraj ve plandan keşif: Metraj ve Keşif sayfalarında blok kalemlerinde (adet / tava / ek parça). Uzunluk, alan ve yazı satırlarında hücre boş kalır. Revizyon sayfasına resim konmaz.
+- Attribute: **Tümü** ve her blok sayfasında satır başına resim. Özet sayfasına konmaz. İçe aktarma bu sütunu attribute sanmaz (`RESIM` etiketli gerçek bir attribute ayrı sütundur).

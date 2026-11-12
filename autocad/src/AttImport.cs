@@ -38,7 +38,7 @@ namespace CadAiDesigner
         public static Dictionary<string, object> Diff(Document doc, string path)
         {
             Dictionary<string, object> body;
-            using (doc.LockDocument()) body = AttExport.Collect(doc.Database, new AttExportRequest { AllLayouts = true });
+            using (doc.LockDocument()) body = AttExport.Collect(doc.Database, new AttExportRequest { AllLayouts = true, Images = false });
             body["path"] = path;
             ServiceHost.EnsureStarted(Settings.Load());
             Dictionary<string, object> resp = Js.Deserialize<Dictionary<string, object>>(ServiceHost.Post("/attributes_import", Js.Serialize(body)));
