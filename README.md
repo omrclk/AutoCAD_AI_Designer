@@ -155,9 +155,20 @@ SeÃ§ilen tÃ¼m nesneler yapay zekaya gÃ¶nderilir (eski 100 sÄ±nÄ±rÄ± 
 - **Referans noktalarÄ±** (panel dÃ¼Ämesi veya `RN`): Ã¶nce kaynak plandan bir nokta, sonra hedef plandaki aynÄ± fiziksel noktayÄ± fareyle (osnap) seÃ§in; koordinat yazmak gerekmez. Ä°steÄe baÄlÄ± ikinci Ã§ift dÃ¶nme ve Ã¶lÃ§ek hesaplatÄ±r. Noktalar oturum boyunca Ã§izim baÅÄ±na saklanÄ±r, panel durum Ã§ubuÄunda gÃ¶rÃ¼nÃ¼r ve yapay zeka baÄlamÄ±na `reference_points` / `reference_transform` olarak girer.
 - **AIDPLANKOPYA / PKOPYA**: seÃ§ili nesneleri (veya `Katman`) referans noktalarÄ±yla kaynaÄÄ±n planÄ±ndan hedef plana kopyalar/taÅÄ±r (bloklar, dÃ¶nme, attribute korunur; tek UNDO). Yapay zeka da `plan_copy` eylemiyle bunu baÅlatÄ±r.
 
-## AIDOLCU (OLC): blok merkezlerinden ardÄ±ÅÄ±k Ã¶lÃ§Ã¼
+## AIDOLCU (OLC): bloklardan yatay ve düşey ölçü
 
-Panelde "Blok Ã¶lÃ§Ã¼sÃ¼" veya `OLC`: seÃ§ilen bloklarÄ±n (karma tipler) geometrik merkezleri (attribute hariÃ§; `Nokta` ile ekleme noktasÄ± seÃ§ilebilir) bulunur, 1 birimden yakÄ±n merkezler birleÅtirilir, sÄ±ranÄ±n ana doÄrultusu (yatay/dÃ¼Åey/aÃ§Ä±lÄ±) hesaplanÄ±r ve ardÄ±ÅÄ±k dÃ¶ndÃ¼rÃ¼lmÃ¼Å Ã¶lÃ§Ã¼ zinciri oluÅturulur. ÃlÃ§Ã¼ Ã§izgisinin tarafÄ±/mesafesi tÄ±klanarak verilir (Enter = varsayÄ±lan). GeÃ§erli Ã¶lÃ§Ã¼ stili ve katman kullanÄ±lÄ±r; `Toplam` ile toplam Ã¶lÃ§Ã¼ eklenir. Tek UNDO.
+Panelde "Blok ölçüsü" veya `OLC` / `AIDOLCU`. Bloklar pencereyle, tek tek veya önceden seçilmiş setle alınır; blok olmayan nesneler yok sayılır, farklı blok tipleri birlikte ölçülür. Referans noktası, attribute'lar hariç geometrik merkezdir (`Nokta` ile ekleme noktası seçilebilir). Birbirine 1 birimden yakın noktalar tek nokta sayılır.
+
+Seçimden sonra `Ölçü mesafesi <son>:` sorulur. Değer yazılır veya iki nokta tıklanır; taraf ayrıca tıklanmaz. Mesafe, taraf, toplam, mod ve tolerans `%LOCALAPPDATA%\CadAiDesigner\olcu.json` içinde saklanır. Ölçü oluşunca aynı kayıt çizimin NOD sözlüğüne de yazılır; çizimdeki revizyon daha yeniyse o geçerlidir.
+
+Ölçüler geçerli ölçü stili ve geçerli katmanla, WCS XY düzleminde (Z=0, UCS yok sayılır) tek UNDO grubunda oluşur.
+
+- **Yatay zincir** (döndürülmüş ölçü, açı 0): farklı X değerleri, 1 birim içinde birleşir. Ölçü çizgisi seçimin en üstünün mesafe kadar üstündedir. Her X için uzatma, o X'i paylaşanlar içinde ölçü çizgisine en yakın bloğun (üstte en büyük Y) referans noktasından çıkar.
+- **Düşey zincir** (açı 90°): farklı Y değerleri. Ölçü çizgisi seçimin en solunun mesafe kadar solundadır. Uzatma, aynı Y'deki en soldaki bloğun referansındandır.
+- **Toplam** (varsayılan Evet): her zincirin bir mesafe daha dışında uçtan uca ölçü. Tek aralıklı zincire ikinci kez eklenmez. `Toplam` ile kapatılır.
+- **Taraf** `[Üst-Sol/Alt-Sağ/Tümü]` (varsayılan Üst-Sol). Üst-Sol yatayı üste, düşeyi sola koyar. Alt-Sağ alta ve sağa koyar (uzatma yine ölçü çizgisine en yakın bloktan). Tümü dört yana koyar.
+- **Mod** `[Zincir/Satir]` (varsayılan Zincir). Satır, bu zincirlere ek olarak aynı satırdaki (Y) ve aynı sütundaki (X) bloklara ayrı zincir koyar. Tolerans `Tolerans` ile verilmezse satırda en küçük blok yüksekliğinin yarısı, sütunda en küçük blok genişliğinin yarısıdır. Satır zinciri satırın üstü + mesafe, sütun zinciri sütunun solu − mesafe konumuna gelir (Alt-Sağ ise alt ve sağ, Tümü ise dört yan). Dış zincirle aynı çizgiye denk gelen satır veya sütun zinciri tekrarlanmaz.
+- Bir doğrultuda en az 2 farklı koordinat yoksa o zincir atlanır ve komut satırına yazılır. Özet: `Yatay: N ölçü, Düşey: M ölçü` (toplam ölçüler dahildir).
 
 ## Attribute Ä°Ã§e Aktar (AIDATTIMPORT / ATI)
 
