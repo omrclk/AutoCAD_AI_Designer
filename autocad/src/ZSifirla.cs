@@ -17,8 +17,8 @@ namespace CadAiDesigner
     /// ZSIFIRLA / AIDZSIFIRLA: project every entity in the current space onto WCS Z=0
     /// (Model, or the active layout's paper space), the way FLATTEN does.
     /// Normals within 0.001 rad of ±Z are snapped to +Z; other planar objects are
-    /// projected. Referenced block definitions (nested and dynamic *U) are flattened
-    /// too, and each definition's Origin Z is set to 0. Xrefs are not opened. One transaction, one UNDO.
+    /// projected. Ordinary block definitions are flattened and their Origin Z is set to 0.
+    /// Dynamic blocks and anonymous *U copies are not edited. Xrefs are not opened. One transaction, one UNDO.
     /// </summary>
     public class ZSifirlaCommands
     {
@@ -103,7 +103,7 @@ namespace CadAiDesigner
                                 if (kind == 1) fixedN++;
                                 else if (kind == 2) skipN++;
                                 BlockReference brTop = ent as BlockReference;
-                                if (brTop != null)
+                                if (brTop != null && !IsDynamicRef(brTop))
                                 {
                                     FlattenAttributes(tr, brTop, lockedSet, ref fixedN, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, false);
                                     EnqueueBlockRef(tr, brTop, blockSeen, blockQueue);
@@ -223,6 +223,16 @@ namespace CadAiDesigner
 
         static int ApplyOne(Transaction tr, Entity ent, string where, ref int elevN, ref int thickN, ref int projN, ref int errN, ref string firstErr)
         {
+            BlockReference dynBr = ent as BlockReference;
+            if (dynBr != null && IsDynamicRef(dynBr))
+            {
+                if (Math.Abs(dynBr.Position.Z) <= Tol)
+                {
+                    LogStep("skip dynamic", where, ent.ObjectId, "BlockReference " + ZInfo(ent) + " " + XyTxt(ent));
+                    return 0;
+                }
+                return ZeroDynamicInsertZ(dynBr, where, ref errN, ref firstErr);
+            }
             string before = ZInfo(ent);
             string xy0 = XyTxt(ent);
             List<Point2d> xyBefore = SampleXY(ent);
@@ -611,40 +621,23 @@ namespace CadAiDesigner
             return locked;
         }
 
-        /// <summary>Queue the definition a reference uses, plus the dynamic master and every anonymous *U copy.</summary>
+        /// <summary>Queue an ordinary block definition. Dynamic masters and anonymous copies are not queued.</summary>
         static void EnqueueBlockRef(Transaction tr, BlockReference br, HashSet<ObjectId> seen, Queue<ObjectId> queue)
         {
-            if (br == null) return;
+            if (br == null || IsDynamicRef(br)) return;
             try { EnqueueDefinition(tr, br.BlockTableRecord, seen, queue); } catch (System.Exception) { }
-            try
-            {
-                if (!br.IsDynamicBlock) return;
-                ObjectId dyn = br.DynamicBlockTableRecord;
-                EnqueueDefinition(tr, dyn, seen, queue);
-                EnqueueAnonymousCopies(tr, dyn, seen, queue);
-            }
-            catch (System.Exception) { }
         }
 
-        static void EnqueueAnonymousCopies(Transaction tr, ObjectId dynId, HashSet<ObjectId> seen, Queue<ObjectId> queue)
-        {
-            BlockTableRecord dyn = tr.GetObject(dynId, OpenMode.ForRead) as BlockTableRecord;
-            if (dyn == null) return;
-            bool isDyn = false;
-            try { isDyn = dyn.IsDynamicBlock; } catch (System.Exception) { return; }
-            if (!isDyn) return;
-            ObjectIdCollection copies = dyn.GetAnonymousBlockIds();
-            if (copies == null) return;
-            foreach (ObjectId id in copies) EnqueueDefinition(tr, id, seen, queue);
-        }
-
-        /// <summary>Skip layouts and true xrefs. Bound and normal blocks are processed. Origin Z is cleared later.</summary>
         static void EnqueueDefinition(Transaction tr, ObjectId id, HashSet<ObjectId> seen, Queue<ObjectId> queue)
         {
             if (id.IsNull || !id.IsValid || !seen.Add(id)) return;
             BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
             if (btr == null || SkipDefinition(btr))
+            {
+                if (btr != null && IsProtectedBlock(btr))
+                    LogStep("skip dynamic", SafeName(btr), id, "BLOCK");
                 return;
+            }
             queue.Enqueue(id);
         }
 
@@ -652,7 +645,125 @@ namespace CadAiDesigner
         {
             if (btr.IsLayout || btr.IsFromExternalReference || btr.IsDependent) return true;
             try { if (btr.IsFromOverlayReference) return true; } catch (System.Exception) { }
+            if (IsProtectedBlock(btr)) return true;
             return false;
+        }
+
+        /// <summary>Dynamic masters, anonymous *U/*D/*X/*T blocks, and bound anonymous A$C blocks.</summary>
+        static bool IsProtectedBlock(BlockTableRecord btr)
+        {
+            try { if (btr.IsDynamicBlock) return true; } catch (System.Exception) { }
+            try { if (btr.IsAnonymous) return true; } catch (System.Exception) { }
+            string name = "";
+            try { name = btr.Name ?? ""; } catch (System.Exception) { name = ""; }
+            if (name.StartsWith("A$C", StringComparison.OrdinalIgnoreCase)) return true;
+            if (name.Length >= 2 && name[0] == '*')
+            {
+                char c = char.ToUpperInvariant(name[1]);
+                if (c == 'U' || c == 'D' || c == 'X' || c == 'T') return true;
+            }
+            return false;
+        }
+
+        static bool IsDynamicRef(BlockReference br)
+        {
+            if (br == null) return false;
+            try { if (br.IsDynamicBlock) return true; } catch (System.Exception) { }
+            try
+            {
+                ObjectId dyn = br.DynamicBlockTableRecord;
+                if (!dyn.IsNull && dyn != br.BlockTableRecord) return true;
+            }
+            catch (System.Exception) { }
+            return false;
+        }
+
+        static bool IsDynamicPart(Entity ent)
+        {
+            if (ent == null) return false;
+            string n = ent.GetType().Name;
+            if (NameHasDynamicPart(n)) return true;
+            try
+            {
+                string rx = ent.GetRXClass().Name;
+                if (NameHasDynamicPart(rx)) return true;
+            }
+            catch (System.Exception) { }
+            return false;
+        }
+
+        static bool NameHasDynamicPart(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (name.IndexOf("Parameter", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.IndexOf("Action", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (name.IndexOf("Grip", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
+        /// <summary>True when Z, elevation, or the normal is off the WCS XY plane. Read-only.</summary>
+        static bool NeedsFlatten(Transaction tr, Entity ent)
+        {
+            if (ent == null || ent.IsErased) return false;
+            Vector3d n;
+            if (TryNormal(ent, out n) && !IsExactPositiveZ(n) && !IsNearPositiveZ(n)) return true;
+            bool off, uniform;
+            double z;
+            if (TryMeasure(tr, ent, out z, out off, out uniform) && off) return true;
+            return false;
+        }
+
+        /// <summary>Drop a dynamic insert's position Z only. Rotation, scale, and visibility stay.</summary>
+        static int ZeroDynamicInsertZ(BlockReference br, string where, ref int errN, ref string firstErr)
+        {
+            string before = ZInfo(br);
+            string xy0 = XyTxt(br);
+            List<Point2d> xyBefore = SampleXY(br);
+            Transaction sub = null;
+            bool closed = false;
+            try
+            {
+                sub = br.Database.TransactionManager.StartTransaction();
+                BlockReference live = sub.GetObject(br.ObjectId, OpenMode.ForWrite) as BlockReference;
+                if (live == null)
+                {
+                    sub.Abort();
+                    closed = true;
+                    LogStep("failed", where, br.ObjectId, "BlockReference " + before + " " + xy0 + " open");
+                    errN++;
+                    return -1;
+                }
+                Point3d p = live.Position;
+                live.Position = new Point3d(p.X, p.Y, 0.0);
+                if (XyMoved(xyBefore, SampleXY(live)))
+                {
+                    sub.Abort();
+                    closed = true;
+                    LogStep("failed", where, br.ObjectId, "BlockReference " + before + " " + xy0 + " -> " + XyTxt(live) + " xy-shift");
+                    if (firstErr == null) firstErr = "BlockReference " + br.Handle + " xy-shift";
+                    errN++;
+                    return -1;
+                }
+                string after = ZInfo(live) + " " + XyTxt(live);
+                sub.Commit();
+                closed = true;
+                LogStep("fixed", where, live.ObjectId, "BlockReference " + before + " " + xy0 + " -> " + after);
+                return 1;
+            }
+            catch (System.Exception ex)
+            {
+                if (sub != null && !closed)
+                {
+                    try { sub.Abort(); } catch (System.Exception) { }
+                }
+                NoteErr(ref errN, ref firstErr, br, ex);
+                LogStep("failed", where, br.ObjectId, "BlockReference " + before + " " + xy0 + " " + ex.Message);
+                return -1;
+            }
+            finally
+            {
+                if (sub != null) sub.Dispose();
+            }
         }
 
         static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen, List<ObjectId> processed,
@@ -668,19 +779,20 @@ namespace CadAiDesigner
                 blocksN++;
                 processed.Add(bid);
                 LogStep("tanim", SafeName(btr), bid, "BLOCK");
-                Write(btr);
                 int fixedHere = 0;
                 try
                 {
                     Point3d org = btr.Origin;
                     if (Math.Abs(org.Z) > Tol)
                     {
+                        Write(btr);
                         btr.Origin = new Point3d(org.X, org.Y, 0.0);
                         blockFixed++;
                         fixedHere++;
                     }
                 }
                 catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok origin", ex); }
+                string blockWhere = "blok:" + SafeName(btr);
                 foreach (ObjectId eid in btr)
                 {
                     if (!eid.IsValid || eid.IsErased) continue;
@@ -690,10 +802,37 @@ namespace CadAiDesigner
                     if (ent == null || ent.IsErased) continue;
                     blockVisited++;
                     if (!ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId)) lockedN++;
-                    int kind = ApplyOne(tr, ent, "blok:" + SafeName(btr), ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
+                    BlockReference nested = ent as BlockReference;
+                    if (nested != null && IsDynamicRef(nested))
+                    {
+                        if (Math.Abs(nested.Position.Z) > Tol)
+                        {
+                            int zKind = ZeroDynamicInsertZ(nested, blockWhere, ref errN, ref firstErr);
+                            if (zKind == 1) { blockFixed++; fixedHere++; }
+                            else if (zKind == 2) skipN++;
+                        }
+                        else
+                        {
+                            LogStep("skip dynamic", blockWhere, eid, "BlockReference " + ZInfo(nested) + " " + XyTxt(nested));
+                            skipN++;
+                        }
+                        continue;
+                    }
+                    if (IsDynamicPart(ent))
+                    {
+                        LogStep("skip dynamic", blockWhere, eid, ent.GetType().Name);
+                        skipN++;
+                        continue;
+                    }
+                    if (!NeedsFlatten(tr, ent))
+                    {
+                        LogStep("unchanged", blockWhere, eid, ent.GetType().Name + " " + ZInfo(ent) + " " + XyTxt(ent));
+                        if (nested != null) EnqueueBlockRef(tr, nested, seen, queue);
+                        continue;
+                    }
+                    int kind = ApplyOne(tr, ent, blockWhere, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                     if (kind == 1) { blockFixed++; fixedHere++; Touch(ent); }
                     else if (kind == 2) skipN++;
-                    BlockReference nested = ent as BlockReference;
                     if (nested == null) continue;
                     int before = blockFixed;
                     FlattenAttributes(tr, nested, lockedSet, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, true);
@@ -716,6 +855,7 @@ namespace CadAiDesigner
                 catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Attribute", ex); continue; }
                 if (ar == null || ar.IsErased) continue;
                 if (!ar.LayerId.IsNull && lockedSet.Contains(ar.LayerId)) lockedN++;
+                if (!NeedsFlatten(tr, ar)) continue;
                 int kind = ApplyOne(tr, ar, "attr", ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                 if (kind == 1)
                 {
@@ -1659,7 +1799,8 @@ namespace CadAiDesigner
             {
                 if (!id.IsValid || id.IsErased) continue;
                 BlockReference br = tr.GetObject(id, OpenMode.ForRead) as BlockReference;
-                if (br == null) continue;
+                if (br == null || IsDynamicRef(br)) continue;
+                if (!NeedsFlatten(tr, br)) continue;
                 int kind = ApplyOne(tr, br, "insert", ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
                 if (kind == 1) { fixedN++; Touch(br); }
             }
