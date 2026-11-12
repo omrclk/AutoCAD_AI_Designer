@@ -23,7 +23,7 @@ def _meta(raw):
     if raw is None:
         return True
     s = str(raw).strip()
-    if s == attrexport.TYPE_COL:
+    if s == attrexport.TYPE_COL or s == attrexport.RESIM_COL:
         return True
     return _key(s) in NON_ATTR
 

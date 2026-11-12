@@ -31,6 +31,8 @@ namespace CadAiDesigner
         public bool AllLayouts;
         public string GroupBy;
         public bool Open = true;
+        /// <summary>Embed a block preview in the Excel Resim column. Default on.</summary>
+        public bool Images = true;
     }
 
     /// <summary>Read-only export of block attributes (any tags) to Excel via the service's xlsx writer.</summary>
@@ -194,6 +196,7 @@ namespace CadAiDesigner
         {
             List<object> blocks = new List<object>();
             Dictionary<string, List<string>> order = new Dictionary<string, List<string>>();
+            Dictionary<string, string> images = rq.Images ? new Dictionary<string, string>() : null;
             using (Transaction tx = db.TransactionManager.StartOpenCloseTransaction())
             {
                 foreach (KeyValuePair<string, ObjectId> sp in Spaces(tx, db, rq.AllLayouts || rq.Only != null))
@@ -222,7 +225,17 @@ namespace CadAiDesigner
                             foreach (KeyValuePair<string, string> c in consts) if (seen.Add(c.Key)) attrs.Add(new object[] { c.Key, c.Value ?? "" });
                             if (attrs.Count == 0 && rq.AttributedOnly) continue;
                             NoteOrder(order, name, ord);
-                            blocks.Add(Row("BLOK", name, br.Layer, br.Handle.ToString(), br.Position.X, br.Position.Y, sp.Key, attrs, consts.Select(c => c.Key).ToList()));
+                            Dictionary<string, object> row = Row("BLOK", name, br.Layer, br.Handle.ToString(), br.Position.X, br.Position.Y, sp.Key, attrs, consts.Select(c => c.Key).ToList());
+                            if (images != null)
+                            {
+                                try
+                                {
+                                    string pic = BlockPreview.Capture(tx, br, images);
+                                    if (pic != null) row["resim"] = pic;
+                                }
+                                catch (System.Exception) { }
+                            }
+                            blocks.Add(row);
                         }
                         else if (dxf == "MULTILEADER")
                         {
@@ -234,12 +247,24 @@ namespace CadAiDesigner
                             NoteOrder(order, li.Name, li.Order);
                             List<object> attrs = new List<object>();
                             foreach (KeyValuePair<string, string> kv in li.Values) attrs.Add(new object[] { kv.Key, kv.Value ?? "" });
-                            blocks.Add(Row("MLEADER", li.Name, ml.Layer, ml.Handle.ToString(), li.X, li.Y, sp.Key, attrs, li.Const.ToList()));
+                            Dictionary<string, object> row = Row("MLEADER", li.Name, ml.Layer, ml.Handle.ToString(), li.X, li.Y, sp.Key, attrs, li.Const.ToList());
+                            if (images != null && ml != null)
+                            {
+                                try
+                                {
+                                    string pic = BlockPreview.Capture(tx, ml.BlockContentId, images);
+                                    if (pic != null) row["resim"] = pic;
+                                }
+                                catch (System.Exception) { }
+                            }
+                            blocks.Add(row);
                         }
                     }
                 tx.Commit();
             }
-            return new Dictionary<string, object> { { "blocks", blocks }, { "tag_order", order } };
+            Dictionary<string, object> result = new Dictionary<string, object> { { "blocks", blocks }, { "tag_order", order } };
+            if (images != null) result["images"] = images;
+            return result;
         }
 
         static void NoteOrder(Dictionary<string, List<string>> order, string name, List<string> ord)
@@ -365,6 +390,9 @@ namespace CadAiDesigner
                 PromptResult gr = ed.GetString(new PromptStringOptions("\nÖzet için gruplanacak etiket (örn. KABLO; boş = özet yok): ") { AllowSpaces = true });
                 if (gr.Status == PromptStatus.Cancel) return;
                 if (gr.Status == PromptStatus.OK && gr.StringResult.Trim().Length > 0) rq.GroupBy = gr.StringResult.Trim();
+                bool? pics = BlockPreview.Ask(ed);
+                if (pics == null) return;
+                rq.Images = pics.Value;
                 ed.WriteMessage("\nAttribute'lar aktarılıyor...");
                 string sum = AttExport.Run(doc, rq);
                 ed.WriteMessage("\n" + sum + "\n");

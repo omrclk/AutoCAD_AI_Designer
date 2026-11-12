@@ -1,8 +1,10 @@
+import base64
 import io
 import os
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'service'))
@@ -83,6 +85,128 @@ class MetrajTests(unittest.TestCase):
         m.save_snapshot(self.d, 'R2', [dict(ITEMS[0], miktar=15.0)])
         r3 = m.report({'items': [], 'snapshot_dir': self.d, 'compare_revisions': ['R1', 'R2']})
         self.assertIn('R1 → R2', r3['summary'])
+
+
+PNG = base64.b64decode(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+DRAW = '{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}'
+REL = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}'
+
+
+def _local(tag):
+    return tag.rsplit('}', 1)[-1]
+
+
+class XlsxImageTests(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+
+    def test_classic_sheet_has_no_drawing(self):
+        p = m.write_xlsx(os.path.join(self.d, 'plain.xlsx'), [('S', [['a'], ['b']])])
+        with zipfile.ZipFile(p) as z:
+            names = z.namelist()
+            xml = z.read('xl/worksheets/sheet1.xml').decode('utf-8')
+            ct = z.read('[Content_Types].xml').decode('utf-8')
+        self.assertNotIn('drawing', xml)
+        self.assertNotIn('xmlns:r', xml)
+        self.assertNotIn('png', ct)
+        self.assertFalse(any(n.startswith('xl/media/') or n.startswith('xl/drawings/') for n in names))
+        m.validate_package(p)
+
+    def test_picture_package_reuses_media_and_keeps_schema_order(self):
+        rows = [
+            ['Kategori', 'Kalem', 'Resim', 'Birim'],
+            ['Blok', 'PRIZ', m.XlsxImage('a'), 'adet'],
+            ['Blok', 'PRIZ', m.XlsxImage('a'), 'adet'],
+            ['Uzunluk', 'Hat', '', 'm'],
+        ]
+        other = [
+            ['Poz No', 'Kalem', 'Resim'],
+            ['', 'PRIZ', m.XlsxImage('a')],
+            [],
+            ['', 'TOPLAM', ''],
+        ]
+        p = m.write_xlsx(os.path.join(self.d, 'img.xlsx'), [('Metraj', rows), ('Keşif', other), ('Not', [['yok']])],
+                         {'a': PNG, 'bogus': 'not-a-png'})
+        m.validate_package(p)
+        with zipfile.ZipFile(p) as z:
+            names = z.namelist()
+            self.assertEqual([n for n in names if n.startswith('xl/media/')], ['xl/media/image1.png'])
+            self.assertEqual(z.read('xl/media/image1.png'), PNG)
+            self.assertIn('xl/drawings/drawing1.xml', names)
+            self.assertIn('xl/drawings/drawing2.xml', names)
+            self.assertNotIn('xl/drawings/drawing3.xml', names)
+            self.assertIn('xl/drawings/_rels/drawing1.xml.rels', names)
+            self.assertIn('xl/worksheets/_rels/sheet1.xml.rels', names)
+            self.assertNotIn('xl/worksheets/_rels/sheet3.xml.rels', names)
+            ct = z.read('[Content_Types].xml').decode('utf-8')
+            self.assertIn('Extension="png"', ct)
+            self.assertIn('/xl/drawings/drawing1.xml', ct)
+            self.assertLess(ct.find('Extension="png"'), ct.find('PartName="/xl/workbook.xml"'))
+            sheet = ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+            kids = [_local(c.tag) for c in list(sheet)]
+            self.assertEqual(kids, ['cols', 'sheetData', 'drawing'])
+            self.assertLess(m._WS_CHILD_ORDER.index('sheetData'), m._WS_CHILD_ORDER.index('drawing'))
+            self.assertEqual(sheet.find(NS + 'drawing').get(REL + 'id'), 'rId1')
+            rows_xml = list(sheet.find(NS + 'sheetData'))
+            self.assertEqual(rows_xml[1].get('ht'), '75')
+            self.assertEqual(rows_xml[1].get('customHeight'), '1')
+            self.assertIsNone(rows_xml[3].get('ht'))  # length row, no picture
+            self.assertIsNone(rows_xml[0].get('ht'))
+            widths = [(c.get('min'), c.get('max'), c.get('width')) for c in sheet.find(NS + 'cols')]
+            self.assertIn(('3', '3', '18'), widths)
+            drawing = ET.fromstring(z.read('xl/drawings/drawing1.xml'))
+            anchors = list(drawing)
+            self.assertEqual(len(anchors), 2)
+            embeds = [a.find('.//' + '{http://schemas.openxmlformats.org/drawingml/2006/main}blip').get(REL + 'embed') for a in anchors]
+            self.assertEqual(embeds, ['rId1', 'rId1'])
+            rels = z.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
+            self.assertEqual(rels.count('image1.png'), 1)
+            self.assertIn('../media/image1.png', rels)
+            # second sheet points at the same media part
+            self.assertIn('../media/image1.png', z.read('xl/drawings/_rels/drawing2.xml.rels').decode('utf-8'))
+            kesif = ET.fromstring(z.read('xl/worksheets/sheet2.xml'))
+            krows = list(kesif.find(NS + 'sheetData'))
+            self.assertEqual(krows[1].get('ht'), '75')
+            self.assertIsNone(krows[3].get('ht'))
+
+    def test_two_keys_two_media_parts(self):
+        rows = [['Ad', 'Resim'], ['A', m.XlsxImage('a')], ['B', m.XlsxImage('b')]]
+        p = m.write_xlsx(os.path.join(self.d, 'two.xlsx'), [('S', rows)], {'a': base64.b64encode(PNG).decode('ascii'), 'b': PNG})
+        with zipfile.ZipFile(p) as z:
+            self.assertEqual(sorted(n for n in z.namelist() if n.startswith('xl/media/')),
+                             ['xl/media/image1.png', 'xl/media/image2.png'])
+            rels = z.read('xl/drawings/_rels/drawing1.xml.rels').decode('utf-8')
+            self.assertIn('rId1', rels)
+            self.assertIn('rId2', rels)
+
+    def test_report_adds_resim_only_for_block_items(self):
+        items = [
+            {'kategori': 'Blok', 'kalem': 'PRIZ', 'birim': 'adet', 'miktar': 2, 'adet': 2, 'resim': 'a'},
+            {'kategori': 'Uzunluk', 'kalem': 'Hat uzunluğu', 'katman': 'E', 'birim': 'm', 'miktar': 4, 'adet': 1},
+        ]
+        r = m.report({'items': [dict(i) for i in items], 'snapshot_dir': self.d, 'prices_path': os.path.join(self.d, 'yok.csv'),
+                      'export_path': os.path.join(self.d, 'out.xlsx'), 'images': {'a': PNG, 'x': '!!!'}})
+        self.assertIn('Blok resimleri: 1 önizleme', r['summary'])
+        rows = m.read_xlsx_rows(r['xlsx'])
+        self.assertEqual(rows[0], ['Kategori', 'Kalem', 'Resim', 'Katman', 'Birim', 'Miktar', 'Adet'])
+        self.assertEqual(rows[1][1], 'PRIZ')
+        self.assertEqual(rows[2][1], 'Hat uzunluğu')
+        with zipfile.ZipFile(r['xlsx']) as z:
+            book = z.read('xl/workbook.xml').decode('utf-8')
+            self.assertIn('Keşif', book)
+            kesif = ET.fromstring(z.read('xl/worksheets/sheet2.xml'))
+            head = ''.join(t.text or '' for t in kesif.iter(NS + 't'))
+            self.assertIn('Resim', head)
+            rev = z.read('xl/worksheets/sheet3.xml').decode('utf-8')
+            self.assertNotIn('drawing', rev)
+            self.assertNotIn('Resim', rev)
+
+    def test_report_without_images_is_unchanged(self):
+        r = m.report({'items': [dict(i) for i in ITEMS], 'export_path': os.path.join(self.d, 'out.xlsx'), 'snapshot_dir': self.d})
+        self.assertNotIn('Resim', m.read_xlsx_rows(r['xlsx'])[0])
+        self.assertNotIn('önizleme', r['summary'])
 
 
 if __name__ == '__main__':

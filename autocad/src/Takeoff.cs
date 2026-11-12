@@ -20,6 +20,8 @@ namespace CadAiDesigner
         public string SaveRevision, CompareTo, CompareDwg;
         public string[] CompareRevisions;
         public bool Export = true;
+        /// <summary>Embed a block preview in the Excel Resim column. Default on; the command prompt can turn it off.</summary>
+        public bool Images = true;
     }
 
     /// <summary>Read-only quantity takeoff (metraj) of model space. Lengths/areas in metres via INSUNITS.</summary>
@@ -49,7 +51,7 @@ namespace CadAiDesigner
             }
         }
 
-        class Acc { public string Kat, Kalem, Birim, Katman; public double Miktar; public int Adet; }
+        class Acc { public string Kat, Kalem, Birim, Katman, Resim; public double Miktar; public int Adet; }
 
         static string R(double v) { return Math.Round(v, 2).ToString("0.##", CultureInfo.InvariantCulture); }
 
@@ -71,28 +73,42 @@ namespace CadAiDesigner
             return null;
         }
 
-        public static List<Dictionary<string, object>> Compute(Database db, TakeoffRequest rq, List<string> notes, Transaction ext = null)
+        public static List<Dictionary<string, object>> Compute(Database db, TakeoffRequest rq, List<string> notes, Transaction ext = null, Dictionary<string, string> images = null)
         {
             double f = UnitFactor(db, notes), f2 = f * f;
             Dictionary<string, Acc> acc = new Dictionary<string, Acc>();
             Dictionary<ObjectId, double[]> defSize = new Dictionary<ObjectId, double[]>();
+            int skipped = 0;
+            FitConfig fcfg; try { fcfg = FitConfig.Load(); } catch (System.Exception ex) { fcfg = new FitConfig(); notes.Add("Not: fittings.json okunamadı, varsayılanlar kullanıldı (" + ex.Message + ")."); }
+            Transaction own = ext == null ? db.TransactionManager.StartOpenCloseTransaction() : null;
+            Transaction tx = ext ?? own;
+            // Set only while a block reference is being measured. The first instance of each aggregated line
+            // keeps its picture (anonymous *U, so visibility is reflected; later stretches of the same kalem reuse it).
+            ObjectId shotDef = ObjectId.Null, shotBase = ObjectId.Null;
             Action<string, string, string, string, double, int> add = (kat, kalem, birim, katman, q, n) =>
             {
                 string k = kat + "|" + kalem + "|" + katman;
                 Acc a;
                 if (!acc.TryGetValue(k, out a)) acc[k] = a = new Acc { Kat = kat, Kalem = kalem, Birim = birim, Katman = katman };
                 a.Miktar += q; a.Adet += n;
+                if (images != null && string.IsNullOrEmpty(a.Resim) && !shotDef.IsNull)
+                {
+                    try
+                    {
+                        string pic = BlockPreview.Capture(tx, shotDef, images);
+                        if (pic == null && !shotBase.IsNull && shotBase != shotDef) pic = BlockPreview.Capture(tx, shotBase, images);
+                        if (!string.IsNullOrEmpty(pic)) a.Resim = pic;
+                    }
+                    catch (System.Exception) { }
+                }
             };
-            int skipped = 0;
-            FitConfig fcfg; try { fcfg = FitConfig.Load(); } catch (System.Exception ex) { fcfg = new FitConfig(); notes.Add("Not: fittings.json okunamadı, varsayılanlar kullanıldı (" + ex.Message + ")."); }
-            Transaction own = ext == null ? db.TransactionManager.StartOpenCloseTransaction() : null;
-            Transaction tx = ext ?? own;
             try
             {
                 BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
                 BlockTableRecord ms = (BlockTableRecord)tx.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
                 foreach (ObjectId id in ms)
                 {
+                    shotDef = ObjectId.Null; shotBase = ObjectId.Null;
                     if (rq.Only != null && !rq.Only.Contains(id)) continue;
                     Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
                     if (e == null) continue;
@@ -104,6 +120,15 @@ namespace CadAiDesigner
                         {
                             string name = EffName(tx, br);
                             if (name.StartsWith("*")) continue;
+                            if (images != null)
+                            {
+                                try
+                                {
+                                    shotDef = br.BlockTableRecord;
+                                    if (br.IsDynamicBlock) shotBase = br.DynamicBlockTableRecord;
+                                }
+                                catch (System.Exception) { }
+                            }
                             if (TrayKesif.Try(tx, br, name, fcfg, add, f)) continue;
                             List<string> grp = new List<string>();
                             DynamicBlockReferenceProperty lp = Prop(br, LengthNames), wp = Prop(br, WidthNames);
@@ -162,10 +187,15 @@ namespace CadAiDesigner
             if (skipped > 0) notes.Add("Not: " + skipped + " nesne ölçülemedi ve atlandı.");
             notes.Add("Not: yalnızca Model alanı sayıldı; iç içe (nested) bloklar ve XREF'ler ayrıca açılmadı.");
             return acc.Values.OrderBy(a => a.Kat).ThenBy(a => a.Kalem).ThenBy(a => a.Katman)
-                .Select(a => new Dictionary<string, object>
+                .Select(a =>
                 {
-                    { "kategori", a.Kat }, { "kalem", a.Kalem }, { "birim", a.Birim }, { "katman", a.Katman },
-                    { "miktar", Math.Round(a.Miktar, 4) }, { "adet", a.Adet }
+                    Dictionary<string, object> d = new Dictionary<string, object>
+                    {
+                        { "kategori", a.Kat }, { "kalem", a.Kalem }, { "birim", a.Birim }, { "katman", a.Katman },
+                        { "miktar", Math.Round(a.Miktar, 4) }, { "adet", a.Adet }
+                    };
+                    if (!string.IsNullOrEmpty(a.Resim)) d["resim"] = a.Resim;
+                    return d;
                 }).ToList();
         }
 
@@ -314,7 +344,7 @@ namespace CadAiDesigner
     internal static class Metraj
     {
         public static event Action<string> Finished;
-        static readonly JavaScriptSerializer Js = new JavaScriptSerializer { MaxJsonLength = 32000000, RecursionLimit = 40 };
+        static readonly JavaScriptSerializer Js = new JavaScriptSerializer { MaxJsonLength = 64000000, RecursionLimit = 40 };
 
         static bool Saved(Document doc) { return Path.IsPathRooted(doc.Name) && File.Exists(doc.Name); }
         static string DwgName(Document doc) { return Path.GetFileNameWithoutExtension(doc.Name); }
@@ -359,12 +389,14 @@ namespace CadAiDesigner
         {
             List<string> notes = new List<string>();
             List<Dictionary<string, object>> items;
-            using (doc.LockDocument()) items = Takeoff.Compute(doc.Database, rq, notes);
+            Dictionary<string, string> images = rq.Images ? new Dictionary<string, string>() : null;
+            using (doc.LockDocument()) items = Takeoff.Compute(doc.Database, rq, notes, null, images);
             Dictionary<string, object> body = new Dictionary<string, object>
             {
                 { "items", items }, { "notes", notes }, { "dwg", doc.Name }, { "snapshot_dir", SnapshotDir(doc) },
                 { "prices_path", PricesPath() }
             };
+            if (images != null) body["images"] = images;
             if (rq.Export) body["export_path"] = ExportPath(doc);
             if (!string.IsNullOrEmpty(rq.SaveRevision)) body["save_revision"] = rq.SaveRevision;
             if (!string.IsNullOrEmpty(rq.CompareTo)) body["compare_to"] = rq.CompareTo;
@@ -385,13 +417,14 @@ namespace CadAiDesigner
         }
 
         /// <summary>Prices/exports precomputed items (plan keşif). Returns the summary text.</summary>
-        public static string Send(Document doc, List<Dictionary<string, object>> items, List<string> notes, string kind)
+        public static string Send(Document doc, List<Dictionary<string, object>> items, List<string> notes, string kind, Dictionary<string, string> images = null)
         {
             Dictionary<string, object> body = new Dictionary<string, object>
             {
                 { "items", items }, { "notes", notes }, { "dwg", doc.Name }, { "snapshot_dir", SnapshotDir(doc) },
                 { "prices_path", PricesPath() }, { "export_path", ExportPath(doc, kind) }
             };
+            if (images != null) body["images"] = images;
             string xlsx = (string)body["export_path"];
             ServiceHost.EnsureStarted(Settings.Load());
             Dictionary<string, object> resp = Js.Deserialize<Dictionary<string, object>>(ServiceHost.Post("/metraj", Js.Serialize(body)));
@@ -478,6 +511,9 @@ namespace CadAiDesigner
                     if (fr.Status != PromptStatus.OK) return;
                     rq.CompareDwg = fr.StringResult;
                 }
+                bool? pics = BlockPreview.Ask(ed);
+                if (pics == null) return;
+                rq.Images = pics.Value;
                 ed.WriteMessage("\nMetraj hesaplanıyor...");
                 string sum = CadAiDesigner.Metraj.Run(doc, rq);
                 ed.WriteMessage("\n" + sum + "\n");

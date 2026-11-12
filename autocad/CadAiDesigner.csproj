@@ -49,6 +49,7 @@
     <Compile Include="src\Fittings.cs" />
     <Compile Include="src\Targets.cs" />
     <Compile Include="src\Preview.cs" />
+    <Compile Include="src\BlockPreview.cs" />
     <Compile Include="src\Settings.cs" />
     <Compile Include="src\ServiceHost.cs" />
     <Compile Include="src\Panel.cs" />

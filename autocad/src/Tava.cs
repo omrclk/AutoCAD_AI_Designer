@@ -284,6 +284,14 @@ namespace CadAiDesigner
                 }
                 ts.Save();
 
+                bool withPictures = true;
+                if (kesif)
+                {
+                    bool? pics = BlockPreview.Ask(ed);
+                    if (pics == null) return;
+                    withPictures = pics.Value;
+                }
+
                 // 3) everything in one transaction = one UNDO step
                 ApplyResult res = new ApplyResult();
                 int pairs, singles, ignored, dups = 0, arcs = 0;
@@ -369,12 +377,13 @@ namespace CadAiDesigner
                     {
                         // simulate AIDTAVA + AIDBAGLANTI, measure the result, then roll everything back (drawing untouched)
                         List<string> kn = new List<string>();
-                        TakeoffRequest rq = new TakeoffRequest { Only = new HashSet<ObjectId>(ms.Cast<ObjectId>().Where(i => !before.Contains(i))) };
-                        List<Dictionary<string, object>> items = Takeoff.Compute(db, rq, kn, tx);
+                        Dictionary<string, string> pics = withPictures ? new Dictionary<string, string>() : null;
+                        TakeoffRequest rq = new TakeoffRequest { Only = new HashSet<ObjectId>(ms.Cast<ObjectId>().Where(i => !before.Contains(i))), Images = withPictures };
+                        List<Dictionary<string, object>> items = Takeoff.Compute(db, rq, kn, tx, pics);
                         tx.Abort();
                         kn.RemoveAll(x => x.Contains("Model alan"));
                         kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
-                        string ks = Metraj.Send(doc, items, kn, "plankesif");
+                        string ks = Metraj.Send(doc, items, kn, "plankesif", pics);
                         ed.WriteMessage("\nPlandan keşif: " + ks + "\n");
                         Metraj.Raise("Plandan keşif: " + ks);
                         return;
