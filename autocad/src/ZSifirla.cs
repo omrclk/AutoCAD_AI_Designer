@@ -1051,7 +1051,7 @@ namespace CadAiDesigner
                     br.ScaleFactors = new Scale3d(s.ScaleX, s.ScaleY, s.ScaleZ);
             }
             catch (System.Exception) { }
-            try { if (br.Normal.DistanceTo(s.Normal) > 1e-9) br.Normal = s.Normal; } catch (System.Exception) { }
+            try { if ((br.Normal - s.Normal).Length > 1e-9) br.Normal = s.Normal; } catch (System.Exception) { }
             try
             {
                 int index = 0;
