@@ -207,11 +207,11 @@ Panel: **Oda sınırı çiz**. Tek pencere seçimi; OSAY ile aynı oda tespiti (
 
 Panelde **Z=0** düğmesi veya komut satırında `ZSIFIRLA` (alias `AIDZSIFIRLA`). Seçim istenmez.
 
-Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Blok tanımlarına girilmez; yalnız blok referansının ekleme Z değeri değişir.
+Geçerli alandaki bütün nesneler tek işlemde WCS Z=0 yapılır: Model, ya da açık paftanın kağıt alanı. Bu alandaki blokların tanımları da (iç içe bloklar ve dinamik bloğun *U kopyaları) düzlenir; bloğun Origin değeri değişmez. Xref tanımlarına girilmez. Blok referansının ekleme Z değeri ve attribute'ları da sıfırlanır.
 
 - Çizgi, spline ve 3B polyline: nokta Z=0. Yalnız düşey çizgi (XY boyu sıfır) atlanır.
 - LW polyline WCS noktalarına izdüşürülür; normal `+Z`, Elevation 0. Normali `-Z` olanlarda bulge ters çevrilir, plan değişmez. Z eksenine çok yakın normaller `+Z` yapılır.
 - Yay, çember, elips, yazı, blok, ölçü, tarama ve multileader: normal `+Z`, WCS XY korunur. Eğik olanlar da atlanmaz.
 - Kilitli katmanlar işlem sırasında açılır, bitince yeniden kilitlenir. Özet, kilitli katmandaki adedi ve normali düzlenen adedi yazar. İlk hata komut satırına basılır.
 - Çizimin `ELEVATION` sistem değişkeni 0 yapılır. UCS Dünya değilse özet, UCS orijininin Z değerini yazar (UCS değiştirilmez).
-- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, normali düzlenen, atlanan düşey, kilitli katman. Tek UNDO.
+- Özet: düzeltilen nesne, sıfırlanan kot, sıfırlanan kalınlık, normali düzlenen, atlanan düşey, kilitli katman, blok tanımı ve blok içi düzeltilen. Tek UNDO.

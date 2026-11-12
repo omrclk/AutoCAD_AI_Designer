@@ -15,7 +15,8 @@ namespace CadAiDesigner
     /// ZSIFIRLA / AIDZSIFIRLA: project every entity in the current space onto WCS Z=0
     /// (Model, or the active layout's paper space), the way FLATTEN does.
     /// Normals within 0.001 rad of ±Z are snapped to +Z; other planar objects are
-    /// projected. Block definitions are not opened. One transaction, one UNDO.
+    /// projected. Referenced block definitions (nested and dynamic *U) are flattened
+    /// too; their Origin is left unchanged. Xrefs are not opened. One transaction, one UNDO.
     /// </summary>
     public class ZSifirlaCommands
     {
@@ -31,6 +32,7 @@ namespace CadAiDesigner
             Database db = doc.Database;
 
             int fixedN = 0, elevN = 0, thickN = 0, projN = 0, skipN = 0, lockedN = 0, errN = 0, total = 0;
+            int blocksN = 0, blockFixed = 0;
             string firstErr = null;
             string spaceLabel = "Model";
             try
@@ -43,6 +45,9 @@ namespace CadAiDesigner
                     List<ObjectId> lockedIds = LockedLayers(tr, db);
                     HashSet<ObjectId> lockedSet = new HashSet<ObjectId>(lockedIds);
                     List<ObjectId> unlocked = new List<ObjectId>();
+                    Queue<ObjectId> blockQueue = new Queue<ObjectId>();
+                    HashSet<ObjectId> blockSeen = new HashSet<ObjectId>();
+                    blockSeen.Add(space.ObjectId);
                     try
                     {
                         foreach (ObjectId lid in lockedIds)
@@ -78,7 +83,15 @@ namespace CadAiDesigner
                             {
                                 NoteErr(ref errN, ref firstErr, ent, ex);
                             }
+                            BlockReference brTop = ent as BlockReference;
+                            if (brTop != null)
+                            {
+                                FlattenAttributes(tr, brTop, lockedSet, ref fixedN, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, false);
+                                EnqueueBlockRef(tr, brTop, blockSeen, blockQueue);
+                            }
                         }
+
+                        FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, ref blocksN, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
                     }
                     finally
                     {
@@ -122,6 +135,8 @@ namespace CadAiDesigner
                 + "Normal düzlenen/izdüşürülen: " + projN + ". "
                 + "Atlanan (düşey): " + skipN + ". "
                 + "Kilitli katmandaki: " + lockedN + ". "
+                + "Blok tanımı: " + blocksN + ". "
+                + "Blok içi düzeltilen: " + blockFixed + ". "
                 + "Taranan: " + total + ".";
             if (errN > 0) msg += " Hata: " + errN + ".";
             ed.WriteMessage(msg);
@@ -135,6 +150,7 @@ namespace CadAiDesigner
             if (!IsWorldUcs())
                 ed.WriteMessage("\nUCS Dünya değil; orijin Z = " + Fmt(UcsOriginZ(ed)) + " (UCS değiştirilmedi).");
             ed.WriteMessage("\n");
+            try { ed.Regen(); } catch (System.Exception) { }
         }
 
         static void NoteErr(ref int errN, ref string firstErr, Entity ent, System.Exception ex)
@@ -183,6 +199,141 @@ namespace CadAiDesigner
                 if (ltr != null && ltr.IsLocked) locked.Add(id);
             }
             return locked;
+        }
+
+        /// <summary>Queue the definition a reference uses, plus the dynamic master and every anonymous *U copy.</summary>
+        static void EnqueueBlockRef(Transaction tr, BlockReference br, HashSet<ObjectId> seen, Queue<ObjectId> queue)
+        {
+            if (br == null) return;
+            try { EnqueueDefinition(tr, br.BlockTableRecord, seen, queue); } catch (System.Exception) { }
+            try
+            {
+                if (!br.IsDynamicBlock) return;
+                ObjectId dyn = br.DynamicBlockTableRecord;
+                EnqueueDefinition(tr, dyn, seen, queue);
+                EnqueueAnonymousCopies(tr, dyn, seen, queue);
+            }
+            catch (System.Exception) { }
+        }
+
+        static void EnqueueAnonymousCopies(Transaction tr, ObjectId dynId, HashSet<ObjectId> seen, Queue<ObjectId> queue)
+        {
+            BlockTableRecord dyn = tr.GetObject(dynId, OpenMode.ForRead) as BlockTableRecord;
+            if (dyn == null) return;
+            bool isDyn = false;
+            try { isDyn = dyn.IsDynamicBlock; } catch (System.Exception) { return; }
+            if (!isDyn) return;
+            ObjectIdCollection copies = dyn.GetAnonymousBlockIds();
+            if (copies == null) return;
+            foreach (ObjectId id in copies) EnqueueDefinition(tr, id, seen, queue);
+        }
+
+        /// <summary>Skip layouts, xrefs, and xref-dependent records. Origin is never modified.</summary>
+        static void EnqueueDefinition(Transaction tr, ObjectId id, HashSet<ObjectId> seen, Queue<ObjectId> queue)
+        {
+            if (id.IsNull || !id.IsValid || !seen.Add(id)) return;
+            BlockTableRecord btr = tr.GetObject(id, OpenMode.ForRead) as BlockTableRecord;
+            if (btr == null || SkipDefinition(btr))
+                return;
+            queue.Enqueue(id);
+        }
+
+        static bool SkipDefinition(BlockTableRecord btr)
+        {
+            if (btr.IsLayout || btr.IsFromExternalReference || btr.IsDependent) return true;
+            try { if (btr.IsFromOverlayReference) return true; } catch (System.Exception) { }
+            return false;
+        }
+
+        static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen,
+            ref int blocksN, ref int blockFixed, ref int lockedN, ref int elevN, ref int thickN, ref int projN, ref int skipN, ref int errN, ref string firstErr)
+        {
+            while (queue.Count > 0)
+            {
+                ObjectId bid = queue.Dequeue();
+                BlockTableRecord btr = null;
+                try { btr = tr.GetObject(bid, OpenMode.ForRead) as BlockTableRecord; }
+                catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok", ex); continue; }
+                if (btr == null || SkipDefinition(btr)) continue;
+                blocksN++;
+                // btr.Origin stays as stored. Only entities inside the definition move.
+                int fixedHere = 0;
+                foreach (ObjectId eid in btr)
+                {
+                    if (!eid.IsValid || eid.IsErased) continue;
+                    Entity ent = null;
+                    try { ent = tr.GetObject(eid, OpenMode.ForRead) as Entity; }
+                    catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok varlığı", ex); continue; }
+                    if (ent == null || ent.IsErased) continue;
+                    if (!ent.LayerId.IsNull && lockedSet.Contains(ent.LayerId)) lockedN++;
+                    try
+                    {
+                        int kind = Flatten(tr, ent, ref elevN, ref thickN, ref projN);
+                        if (kind == 1) { blockFixed++; fixedHere++; Touch(ent); }
+                        else if (kind == 2) skipN++;
+                    }
+                    catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, ent, ex); }
+                    BlockReference nested = ent as BlockReference;
+                    if (nested == null) continue;
+                    int before = blockFixed;
+                    FlattenAttributes(tr, nested, lockedSet, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr, true);
+                    if (blockFixed > before) fixedHere += blockFixed - before;
+                    EnqueueBlockRef(tr, nested, seen, queue);
+                }
+                if (fixedHere > 0) TouchReferences(tr, btr);
+            }
+        }
+
+        static void FlattenAttributes(Transaction tr, BlockReference br, HashSet<ObjectId> lockedSet,
+            ref int fixedN, ref int lockedN, ref int elevN, ref int thickN, ref int projN, ref int skipN, ref int errN, ref string firstErr, bool markGraphics)
+        {
+            if (br == null || br.AttributeCollection == null) return;
+            foreach (ObjectId aid in br.AttributeCollection)
+            {
+                if (!aid.IsValid || aid.IsErased) continue;
+                AttributeReference ar = null;
+                try { ar = tr.GetObject(aid, OpenMode.ForRead) as AttributeReference; }
+                catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Attribute", ex); continue; }
+                if (ar == null || ar.IsErased) continue;
+                if (!ar.LayerId.IsNull && lockedSet.Contains(ar.LayerId)) lockedN++;
+                try
+                {
+                    int kind = Flatten(tr, ar, ref elevN, ref thickN, ref projN);
+                    if (kind == 1)
+                    {
+                        fixedN++;
+                        if (markGraphics) Touch(ar);
+                    }
+                    else if (kind == 2) skipN++;
+                }
+                catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, ar, ex); }
+            }
+        }
+
+        static void Touch(Entity ent)
+        {
+            try
+            {
+                if (ent == null) return;
+                if (!ent.IsWriteEnabled) ent.UpgradeOpen();
+                ent.RecordGraphicsModified(true);
+            }
+            catch (System.Exception) { }
+        }
+
+        static void TouchReferences(Transaction tr, BlockTableRecord btr)
+        {
+            try
+            {
+                ObjectIdCollection refs = btr.GetBlockReferenceIds(true, false);
+                if (refs == null) return;
+                foreach (ObjectId rid in refs)
+                {
+                    Entity r = tr.GetObject(rid, OpenMode.ForRead) as Entity;
+                    Touch(r);
+                }
+            }
+            catch (System.Exception) { }
         }
 
         /// <summary>1 = modified, 2 = skipped (vertical line/ray), 0 = already flat.</summary>
@@ -532,7 +683,7 @@ namespace CadAiDesigner
 
         static int FlattenBlock(BlockReference br, ref int elevN, ref int thickN, ref int projN)
         {
-            // Insertion only. The block definition is not opened.
+            // Insertion Z only. The definition is flattened separately; its Origin is not moved.
             Vector3d n = br.Normal;
             bool project = !IsExactPositiveZ(n);
             Point3d p = br.Position;
