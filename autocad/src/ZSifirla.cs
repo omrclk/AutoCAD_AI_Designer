@@ -16,7 +16,7 @@ namespace CadAiDesigner
     /// (Model, or the active layout's paper space), the way FLATTEN does.
     /// Normals within 0.001 rad of ±Z are snapped to +Z; other planar objects are
     /// projected. Referenced block definitions (nested and dynamic *U) are flattened
-    /// too; their Origin is left unchanged. Xrefs are not opened. One transaction, one UNDO.
+    /// too, and each definition's Origin Z is set to 0. Xrefs are not opened. One transaction, one UNDO.
     /// </summary>
     public class ZSifirlaCommands
     {
@@ -35,6 +35,8 @@ namespace CadAiDesigner
             int blocksN = 0, blockFixed = 0;
             string firstErr = null;
             string spaceLabel = "Model";
+            string leftover = null;
+            List<ObjectId> processedBlocks = new List<ObjectId>();
             try
             {
                 using (doc.LockDocument())
@@ -91,7 +93,9 @@ namespace CadAiDesigner
                             }
                         }
 
-                        FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, ref blocksN, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
+                        FlattenDefinitions(tr, lockedSet, blockQueue, blockSeen, processedBlocks, ref blocksN, ref blockFixed, ref lockedN, ref elevN, ref thickN, ref projN, ref skipN, ref errN, ref firstErr);
+                        ForceInserts(tr, space, ref fixedN, ref elevN, ref thickN, ref projN, ref errN, ref firstErr);
+                        leftover = CollectLeftover(tr, space, spaceLabel, processedBlocks);
                     }
                     finally
                     {
@@ -141,6 +145,7 @@ namespace CadAiDesigner
             if (errN > 0) msg += " Hata: " + errN + ".";
             ed.WriteMessage(msg);
             if (firstErr != null) ed.WriteMessage("\nİlk hata: " + firstErr);
+            if (!string.IsNullOrEmpty(leftover)) ed.WriteMessage("\n" + leftover);
             if (elevErr != null)
                 ed.WriteMessage("\nELEVATION sistem değişkeni ayarlanamadı: " + elevErr);
             else if (Math.Abs(prevElev) > Tol)
@@ -228,7 +233,7 @@ namespace CadAiDesigner
             foreach (ObjectId id in copies) EnqueueDefinition(tr, id, seen, queue);
         }
 
-        /// <summary>Skip layouts, xrefs, and xref-dependent records. Origin is never modified.</summary>
+        /// <summary>Skip layouts and true xrefs. Bound and normal blocks are processed. Origin Z is cleared later.</summary>
         static void EnqueueDefinition(Transaction tr, ObjectId id, HashSet<ObjectId> seen, Queue<ObjectId> queue)
         {
             if (id.IsNull || !id.IsValid || !seen.Add(id)) return;
@@ -245,7 +250,7 @@ namespace CadAiDesigner
             return false;
         }
 
-        static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen,
+        static void FlattenDefinitions(Transaction tr, HashSet<ObjectId> lockedSet, Queue<ObjectId> queue, HashSet<ObjectId> seen, List<ObjectId> processed,
             ref int blocksN, ref int blockFixed, ref int lockedN, ref int elevN, ref int thickN, ref int projN, ref int skipN, ref int errN, ref string firstErr)
         {
             while (queue.Count > 0)
@@ -256,8 +261,20 @@ namespace CadAiDesigner
                 catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok", ex); continue; }
                 if (btr == null || SkipDefinition(btr)) continue;
                 blocksN++;
-                // btr.Origin stays as stored. Only entities inside the definition move.
+                processed.Add(bid);
+                Write(btr);
                 int fixedHere = 0;
+                try
+                {
+                    Point3d org = btr.Origin;
+                    if (Math.Abs(org.Z) > Tol)
+                    {
+                        btr.Origin = new Point3d(org.X, org.Y, 0.0);
+                        blockFixed++;
+                        fixedHere++;
+                    }
+                }
+                catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, "Blok origin", ex); }
                 foreach (ObjectId eid in btr)
                 {
                     if (!eid.IsValid || eid.IsErased) continue;
@@ -325,7 +342,7 @@ namespace CadAiDesigner
         {
             try
             {
-                ObjectIdCollection refs = btr.GetBlockReferenceIds(true, false);
+                ObjectIdCollection refs = btr.GetBlockReferenceIds(false, true);
                 if (refs == null) return;
                 foreach (ObjectId rid in refs)
                 {
@@ -355,6 +372,10 @@ namespace CadAiDesigner
             if (ent is Dimension) return FlattenDim((Dimension)ent, ref elevN, ref thickN, ref projN);
             if (ent is Hatch) return FlattenHatch((Hatch)ent, ref elevN, ref thickN, ref projN);
             if (ent is BlockReference) return FlattenBlock((BlockReference)ent, ref elevN, ref thickN, ref projN);
+            if (ent is Face) return FlattenFace((Face)ent);
+            if (ent is Solid) return FlattenSolid((Solid)ent, ref thickN, ref projN);
+            if (ent is Trace) return FlattenTrace((Trace)ent, ref thickN, ref projN);
+            if (ent is Region) return FlattenRegion((Region)ent);
             if (ent is Viewport) return FlattenViewport((Viewport)ent, ref elevN, ref thickN);
             if (ent is Ray) return FlattenRay((Ray)ent, ref elevN, ref thickN);
             if (ent is Xline) return FlattenXline((Xline)ent, ref elevN, ref thickN);
@@ -449,8 +470,11 @@ namespace CadAiDesigner
             {
                 Vertex2d v = tr.GetObject(vid, OpenMode.ForRead) as Vertex2d;
                 if (v == null) continue;
-                // Vertex2d.Position is OCS; the plane Z lives on the polyline elevation.
-                Point3d wcs = new Point3d(v.Position.X, v.Position.Y, elev).TransformBy(toWcs);
+                // Vertex2d.Position is OCS. Elevation is the plane Z; some drawings also store Z on the vertex.
+                double vz = v.Position.Z;
+                if (Math.Abs(vz) > Tol) anyZ = true;
+                double planeZ = Math.Abs(vz) > Tol ? vz : elev;
+                Point3d wcs = new Point3d(v.Position.X, v.Position.Y, planeZ).TransformBy(toWcs);
                 if (Math.Abs(wcs.Z) > Tol) anyZ = true;
                 ids.Add(vid);
                 xy.Add(new Point2d(wcs.X, wcs.Y));
@@ -683,7 +707,7 @@ namespace CadAiDesigner
 
         static int FlattenBlock(BlockReference br, ref int elevN, ref int thickN, ref int projN)
         {
-            // Insertion Z only. The definition is flattened separately; its Origin is not moved.
+            // Insertion Z in this owner (model space or a parent block). Definition Origin is handled separately.
             Vector3d n = br.Normal;
             bool project = !IsExactPositiveZ(n);
             Point3d p = br.Position;
@@ -926,6 +950,163 @@ namespace CadAiDesigner
                 ml.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -ml.VertexAt(0).Z)));
             if (ApplyElev(ml, ref elevN)) { }
             if (ApplyThick(ml, ref thickN)) { }
+            return 1;
+        }
+
+        static void ForceInserts(Transaction tr, BlockTableRecord space, ref int fixedN, ref int elevN, ref int thickN, ref int projN, ref int errN, ref string firstErr)
+        {
+            foreach (ObjectId id in space)
+            {
+                if (!id.IsValid || id.IsErased) continue;
+                BlockReference br = tr.GetObject(id, OpenMode.ForRead) as BlockReference;
+                if (br == null) continue;
+                try
+                {
+                    int kind = Flatten(tr, br, ref elevN, ref thickN, ref projN);
+                    if (kind == 1) { fixedN++; Touch(br); }
+                }
+                catch (System.Exception ex) { NoteErr(ref errN, ref firstErr, br, ex); }
+            }
+        }
+
+        const double ReportZ = 1e-6;
+
+        static string CollectLeftover(Transaction tr, BlockTableRecord space, string spaceLabel, List<ObjectId> blocks)
+        {
+            int count = 0;
+            List<string> samples = new List<string>();
+            List<string> inserts = new List<string>();
+            ScanOwner(tr, space, spaceLabel, ref count, samples, inserts);
+            foreach (ObjectId bid in blocks)
+            {
+                BlockTableRecord btr = tr.GetObject(bid, OpenMode.ForRead) as BlockTableRecord;
+                if (btr == null) continue;
+                string name = btr.Name;
+                try { if (string.IsNullOrEmpty(name)) name = bid.Handle.ToString(); } catch (System.Exception) { }
+                ScanOwner(tr, btr, name, ref count, samples, inserts);
+            }
+            if (count == 0) return "Kalan Z'li nesne: 0.";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append("Kalan Z'li nesne: ").Append(count).Append(".");
+            int shown = 0;
+            foreach (string s in samples)
+            {
+                if (shown >= 5) break;
+                sb.Append("\n  ").Append(s);
+                shown++;
+            }
+            foreach (string s in inserts)
+            {
+                if (shown >= 5) break;
+                sb.Append("\n  ").Append(s);
+                shown++;
+            }
+            return sb.ToString();
+        }
+
+        static void ScanOwner(Transaction tr, BlockTableRecord owner, string blockName, ref int count, List<string> samples, List<string> inserts)
+        {
+            foreach (ObjectId id in owner)
+            {
+                if (!id.IsValid || id.IsErased) continue;
+                Entity ent = null;
+                try { ent = tr.GetObject(id, OpenMode.ForRead) as Entity; }
+                catch (System.Exception) { continue; }
+                if (ent == null || ent.IsErased) continue;
+                Extents3d ex;
+                try { ex = ent.GeometricExtents; }
+                catch (System.Exception) { continue; }
+                if (Math.Abs(ex.MinPoint.Z) <= ReportZ && Math.Abs(ex.MaxPoint.Z) <= ReportZ) continue;
+                count++;
+                string type = ent.GetType().Name;
+                try { string dxf = ent.GetRXClass().DxfName; if (!string.IsNullOrEmpty(dxf)) type = dxf; } catch (System.Exception) { }
+                string layer = "";
+                try { layer = ent.Layer; } catch (System.Exception) { }
+                string line = "Blok " + blockName + ", " + type + ", katman " + layer + ", Z " + Fmt(ex.MinPoint.Z) + " .. " + Fmt(ex.MaxPoint.Z);
+                BlockReference br = ent as BlockReference;
+                if (br != null)
+                {
+                    try
+                    {
+                        BlockTableRecord def = tr.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+                        if (def != null) line += " (referans " + def.Name + ")";
+                    }
+                    catch (System.Exception) { }
+                    if (inserts.Count < 5) inserts.Add(line);
+                }
+                else if (samples.Count < 5) samples.Add(line);
+            }
+        }
+
+        static int FlattenFace(Face face)
+        {
+            bool changed = false;
+            for (short i = 0; i < 4; i++)
+            {
+                Point3d p = face.GetVertexAt(i);
+                if (Math.Abs(p.Z) <= Tol) continue;
+                Write(face);
+                face.SetVertexAt(i, Flat(p));
+                changed = true;
+            }
+            return changed ? 1 : 0;
+        }
+
+        static int FlattenSolid(Solid solid, ref int thickN, ref int projN)
+        {
+            return FlattenQuad(solid, solid.Normal, true,
+                delegate (short i) { return solid.GetPointAt(i); },
+                delegate (short i, Point3d p) { solid.SetPointAt(i, p); },
+                delegate (Vector3d n) { solid.Normal = n; },
+                ref thickN, ref projN);
+        }
+
+        static int FlattenTrace(Trace trace, ref int thickN, ref int projN)
+        {
+            return FlattenQuad(trace, trace.Normal, true,
+                delegate (short i) { return trace.GetPointAt(i); },
+                delegate (short i, Point3d p) { trace.SetPointAt(i, p); },
+                delegate (Vector3d n) { trace.Normal = n; },
+                ref thickN, ref projN);
+        }
+
+        static int FlattenQuad(Entity ent, Vector3d normal, bool ocs, Func<short, Point3d> getPt, Action<short, Point3d> setPt, Action<Vector3d> setNormal, ref int thickN, ref int projN)
+        {
+            bool project = !IsExactPositiveZ(normal);
+            Matrix3d toWcs = Matrix3d.Identity;
+            if (ocs)
+            {
+                try { toWcs = Matrix3d.PlaneToWorld(normal); }
+                catch (System.Exception) { toWcs = Matrix3d.Identity; }
+            }
+            Point3d[] wcs = new Point3d[4];
+            bool anyZ = false;
+            for (short i = 0; i < 4; i++)
+            {
+                Point3d raw = getPt(i);
+                Point3d w = ocs ? raw.TransformBy(toWcs) : raw;
+                wcs[i] = w;
+                if (Math.Abs(w.Z) > Tol) anyZ = true;
+            }
+            if (!project && !anyZ)
+                return ApplyThick(ent, ref thickN) ? 1 : 0;
+            Write(ent);
+            if (project) { setNormal(Vector3d.ZAxis); projN++; }
+            for (short i = 0; i < 4; i++) setPt(i, new Point3d(wcs[i].X, wcs[i].Y, 0));
+            if (ApplyThick(ent, ref thickN)) { }
+            return 1;
+        }
+
+        static int FlattenRegion(Region region)
+        {
+            Extents3d ex = region.GeometricExtents;
+            double span = Math.Abs(ex.MaxPoint.Z - ex.MinPoint.Z);
+            if (span <= Tol && Math.Abs(ex.MinPoint.Z) <= Tol) return 0;
+            Write(region);
+            if (span <= 1e-4)
+                region.TransformBy(Matrix3d.Displacement(new Vector3d(0, 0, -ex.MinPoint.Z)));
+            else
+                region.TransformBy(ProjectToXY);
             return 1;
         }
 
