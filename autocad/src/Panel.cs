@@ -20,6 +20,7 @@ namespace CadAiDesigner
         readonly Button btnSelect = new Button(), btnAsk = new Button(), btnApply = new Button(),
                         btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = 8000000, RecursionLimit = 40 };
+        readonly ToolTip tips = new ToolTip { AutoPopDelay = 30000, InitialDelay = 400, ReshowDelay = 100, ShowAlways = true };
         string session = Guid.NewGuid().ToString("N");
         bool busy, warnedSel;
 
@@ -32,7 +33,7 @@ namespace CadAiDesigner
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 74));
-            layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 160)); // command categories: height set by fitCommands
             layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
             status.Dock = DockStyle.Fill; status.AutoSize = false; status.Height = 40; status.AutoEllipsis = true; status.Padding = new Padding(0, 0, 0, 6);
@@ -60,24 +61,62 @@ namespace CadAiDesigner
             Setup(btnCancel, "İptal", (s, e) => { ClearPlan(); Log("Plan iptal edildi."); });
             Setup(btnNew, "Yeni sohbet", (s, e) => NewChat());
             Setup(btnSettings, "Ayarlar", (s, e) => OpenSettings());
-            Setup(btnFit, "Ek parçalar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Ek parçalar: tavaları seçin veya Enter (tümü), sonra komut satırında onaylayın."); d.SendStringToExecute("AIDBAGLANTI ", true, false, false); } });
-            Setup(btnTava, "Tava Yerleştir", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Tava Yerleştir: plan çizgilerini seçin veya Tumu, sonra komut satırında seçenekleri onaylayın (Enter = Devam)."); d.SendStringToExecute("AIDTAVA ", true, false, false); } });
-            Setup(btnPk, "Plandan Keşif", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Plandan keşif: plan çizgilerini seçin veya Tumu, sonra Enter (çizim değişmez)."); d.SendStringToExecute("AIDPLANKESIF ", true, false, false); } });
-            Setup(btnRef, "Referans noktaları", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Referans noktaları: önce kaynak plandan bir nokta, sonra hedef plandaki AYNI noktayı fareyle (osnap) seçin. İkinci çift dönme/ölçek için isteğe bağlıdır."); d.SendStringToExecute("AIDREFNOKTA ", true, false, false); } });
-            Setup(btnOlcu, "Blok ölçüsü", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Blok ölçüsü: blokları seçin (pencere), Enter; sonra ölçü çizgisinin tarafını tıklayın (Enter = varsayılan). Ardışık ölçüler blok merkezlerinden yapılır."); d.SendStringToExecute("AIDOLCU ", true, false, false); } });
-            Setup(btnAtt, "Attribute Excel", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute Excel: komut satırındaki soruları yanıtlayın (seçim varsa seçili bloklar aktarılır)."); d.SendStringToExecute("AIDATTEXPORT ", true, false, false); } });
-            Setup(btnAttImp, "Attribute İçe Aktar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute İçe Aktar: düzenlenmiş Excel dosyasını seçin; önizlemeden sonra komut satırında Evet/Hayır ile onaylayın (Handle sütununu değiştirmeyin)."); d.SendStringToExecute("AIDATTIMPORT ", true, false, false); } });
-            Setup(btnMl, "Etiket Bilgisi", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Etiket Bilgisi: seçili multileader (blok içerik) veya attribute bloğu. Farklı değer *Çeşitli* görünür; Uygula yazılan değeri seçili tüm nesnelere yazar."); d.SendStringToExecute("MLBILGI ", true, false, false); } });
+            Setup(btnFit, "Tava ek parçaları (dirsek/T)", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Ek parçalar: tavaları seçin veya Enter (tümü), sonra komut satırında onaylayın."); d.SendStringToExecute("AIDBAGLANTI ", true, false, false); } });
+            Setup(btnTava, "Tava yerleştir (plandan)", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Tava Yerleştir: plan çizgilerini seçin veya Tumu, sonra komut satırında seçenekleri onaylayın (Enter = Devam)."); d.SendStringToExecute("AIDTAVA ", true, false, false); } });
+            Setup(btnPk, "Plandan tava keşfi", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Plandan keşif: plan çizgilerini seçin veya Tumu, sonra Enter (çizim değişmez)."); d.SendStringToExecute("AIDPLANKESIF ", true, false, false); } });
+            Setup(btnRef, "Referans noktası eşle", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Referans noktaları: önce kaynak plandan bir nokta, sonra hedef plandaki AYNI noktayı fareyle (osnap) seçin. İkinci çift dönme/ölçek için isteğe bağlıdır."); d.SendStringToExecute("AIDREFNOKTA ", true, false, false); } });
+            Setup(btnOlcu, "Bloklar arası zincir ölçü", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Blok ölçüsü: blokları seçin (pencere), Enter; sonra ölçü çizgisinin tarafını tıklayın (Enter = varsayılan). Ardışık ölçüler blok merkezlerinden yapılır."); d.SendStringToExecute("AIDOLCU ", true, false, false); } });
+            Setup(btnAtt, "Attribute'ları Excel'e aktar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute Excel: komut satırındaki soruları yanıtlayın (seçim varsa seçili bloklar aktarılır)."); d.SendStringToExecute("AIDATTEXPORT ", true, false, false); } });
+            Setup(btnAttImp, "Excel'den attribute yükle", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Attribute İçe Aktar: düzenlenmiş Excel dosyasını seçin; önizlemeden sonra komut satırında Evet/Hayır ile onaylayın (Handle sütununu değiştirmeyin)."); d.SendStringToExecute("AIDATTIMPORT ", true, false, false); } });
+            Setup(btnMl, "Etiket bilgisi düzenle", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Etiket Bilgisi: seçili multileader (blok içerik) veya attribute bloğu. Farklı değer *Çeşitli* görünür; Uygula yazılan değeri seçili tüm nesnelere yazar."); d.SendStringToExecute("MLBILGI ", true, false, false); } });
             Setup(btnMlKop, "Bloklara etiket kopyala", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Bloklara etiket kopyala: multileader'ı seçin, baz noktasını tıklayın, örnek blokta karşılık gelen noktayı tıklayın (Enter = ekleme noktası), sonra blokları pencere ile seçin. Tekli ile tek tek tıklanır. 50 mm içinde oku olan blok atlanır. Tek UNDO."); d.SendStringToExecute("MLKOPYA ", true, false, false); } });
             Setup(btnOSinir, "Oda sınırı çiz", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Oda sınırı: planı pencere ile seçin; OSAY ile aynı oda tespiti, kapalı polyline A_ODA_SINIR katmanında."); d.SendStringToExecute("AIDODASINIR ", true, false, false); } });
-            Setup(btnOda, "Oda blok sayımı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Oda blok sayımı: kapalı oda polyline'ları (veya iç nokta), isteğe bağlı bina sınırı ve blokları seçin. Excel: satır=blok, sütun=oda, toplamlar; mükerrer tek, bina dışı sayılmaz."); d.SendStringToExecute("AIDODASAYIM ", true, false, false); } });
+            Setup(btnOda, "Odalara göre blok sayımı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Oda blok sayımı: kapalı oda polyline'ları (veya iç nokta), isteğe bağlı bina sınırı ve blokları seçin. Excel: satır=blok, sütun=oda, toplamlar; mükerrer tek, bina dışı sayılmaz."); d.SendStringToExecute("AIDODASAYIM ", true, false, false); } });
             Setup(btnAyd, "Aydınlatma hesabı", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Aydınlatma hesabı: oda/koridor polyline'ını (veya iç nokta) ve armatürleri seçin; H, Φ, MF, yansımalar sorulur. Eort lümen yöntemi, Uo yaklaşık."); d.SendStringToExecute("AIDAYDHESAP ", true, false, false); } });
-            Setup(btnArm, "Armatür yerleşimi", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Armatür yerleşimi: armatür bloğunu tıklayın, sonra açık (koridor: tek sıra) / kapalı (oda: grid) polyline'ları seçin, x mesafesini girin veya iki nokta tıklayın. Uç/duvar = x, aralık = 2x."); d.SendStringToExecute("AIDARMATUR ", true, false, false); } });
-            Setup(btnMetraj, "Metraj", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Metraj: AutoCAD komut satırındaki soruları yanıtlayın (Enter = varsayılan)."); d.SendStringToExecute("AIDMETRAJ ", true, false, false); } });
+            Setup(btnArm, "Armatür yerleştir", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Armatür yerleşimi: armatür bloğunu tıklayın, sonra açık (koridor: tek sıra) / kapalı (oda: grid) polyline'ları seçin, x mesafesini girin veya iki nokta tıklayın. Uç/duvar = x, aralık = 2x."); d.SendStringToExecute("AIDARMATUR ", true, false, false); } });
+            Setup(btnMetraj, "Blok metrajı (Excel)", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Metraj: AutoCAD komut satırındaki soruları yanıtlayın (Enter = varsayılan)."); d.SendStringToExecute("AIDMETRAJ ", true, false, false); } });
             btnApply.Enabled = false; btnCancel.Enabled = false;
+            Tip(btnTava, "AIDTAVA: plan çizgilerini seçin (veya Tumu); kablo tavası yerleştirir. Seçenekleri komut satırında onaylayın (Enter = Devam).");
+            Tip(btnFit, "AIDBAGLANTI: tavaları seçin veya Enter (tümü); dirsek, T gibi ek parçaları ekler. Komut satırında onaylayın.");
+            Tip(btnMetraj, "AIDMETRAJ: blok metrajını Excel'e döker. Komut satırındaki soruları yanıtlayın (Enter = varsayılan).");
+            Tip(btnPk, "AIDPLANKESIF: plan çizgilerinden tava keşfi çıkarır (seçin veya Tumu, sonra Enter). Çizim değişmez.");
+            Tip(btnOda, "AIDODASAYIM: oda polyline'ları (veya iç nokta), isteğe bağlı bina sınırı ve blokları seçin. Excel: satır=blok, sütun=oda. Üst üste binen kopyalar bir kez sayılır, bina dışı sayılmaz.");
+            Tip(btnArm, "AIDARMATUR: armatür bloğunu tıklayın, açık (koridor: tek sıra) / kapalı (oda: grid) polyline'ları seçin, x mesafesini girin. Uç/duvar = x, aralık = 2x.");
+            Tip(btnAyd, "AIDAYDHESAP: oda/koridor polyline'ını (veya iç nokta) ve armatürleri seçin; H, Φ, MF, yansımalar sorulur. Lümen yöntemiyle Eort, Uo yaklaşık.");
+            Tip(btnOSinir, "AIDODASINIR: planı pencere ile seçin; odaları bulup A_ODA_SINIR katmanına kapalı polyline çizer.");
+            Tip(btnMlKop, "MLKOPYA: multileader'ı seçin, baz noktasını ve örnek bloktaki karşılığını tıklayın, sonra blokları seçin; etiket her bloğa kopyalanır. Oku olan blok atlanır. Tek UNDO.");
+            Tip(btnMl, "MLBILGI: seçili multileader veya attribute bloklarının değerlerini düzenler. Farklı değer *Çeşitli* görünür; Uygula seçili tümüne yazar.");
+            Tip(btnOlcu, "AIDOLCU: blokları seçin, ölçü mesafesini girin; bloklar arasına yatay ve düşey zincir ölçü konur (varsayılan üst ve sol).");
+            Tip(btnAtt, "AIDATTEXPORT: blok attribute'larını Excel'e aktarır (seçim varsa yalnızca seçili bloklar).");
+            Tip(btnAttImp, "AIDATTIMPORT: düzenlenmiş Excel dosyasını seçin; önizlemeden sonra Evet/Hayır ile attribute'lara geri yazar (Handle sütununu değiştirmeyin).");
+            Tip(btnRef, "AIDREFNOKTA: kaynak plandan bir nokta, sonra hedef plandaki AYNI noktayı seçin; ikinci çift dönme/ölçek için isteğe bağlıdır.");
+            Tip(btnSelect, "Çizimdeki seçimi AI'ya gönderilecek nesneler olarak alır.");
+            Tip(btnAsk, "Yazdığınız isteğe göre bir öneri hazırlar (Ctrl+Enter); çizime henüz hiçbir şey yazılmaz.");
+            Tip(btnApply, "Önizlenen planı çizime uygular (tek UNDO ile geri alınır).");
+            Tip(btnCancel, "Bekleyen planı ve önizlemeyi iptal eder.");
+            Tip(btnNew, "Sohbeti ve bekleyen planı temizleyip yeni sohbet başlatır.");
+            Tip(btnSettings, "API anahtarı, model ve diğer ayarlar.");
 
-            FlowLayoutPanel buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0) };
-            buttons.Controls.AddRange(new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings, btnMetraj, btnTava, btnPk, btnRef, btnOlcu, btnFit, btnAtt, btnAttImp, btnMl, btnMlKop, btnArm, btnAyd, btnOda, btnOSinir });
+            // Commands grouped by category (bold header + wrapping button row); the area scrolls when the palette is short.
+            FlowLayoutPanel buttons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false, FlowDirection = FlowDirection.TopDown, Margin = new Padding(0), Padding = new Padding(0) };
+            List<FlowLayoutPanel> groups = new List<FlowLayoutPanel>();
+            Font headerFont = new Font(Font, FontStyle.Bold);
+            Action<string, Control[]> addGroup = (title, items) =>
+            {
+                Label h = new Label { Text = title, AutoSize = true, Font = headerFont, Margin = new Padding(0, buttons.Controls.Count == 0 ? 0 : 6, 0, 0) };
+                FlowLayoutPanel g = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true, FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0) };
+                g.Controls.AddRange(items);
+                buttons.Controls.Add(h); buttons.Controls.Add(g); groups.Add(g);
+            };
+            addGroup("Kablo tavası", new Control[] { btnTava, btnFit });
+            addGroup("Keşif / metraj", new Control[] { btnMetraj, btnPk, btnOda });
+            addGroup("Aydınlatma", new Control[] { btnArm, btnAyd, btnOSinir });
+            addGroup("Etiket / ölçü", new Control[] { btnMlKop, btnMl, btnOlcu });
+            addGroup("Excel aktarım", new Control[] { btnAtt, btnAttImp });
+            addGroup("Çizim düzeltme", new Control[] { btnRef });
+            addGroup("AI asistan", new Control[] { btnSelect, btnAsk, btnApply, btnCancel, btnNew, btnSettings });
+            Panel cmdHost = new Panel { Dock = DockStyle.Fill, AutoScroll = true, Margin = new Padding(0, 4, 0, 0) };
+            cmdHost.Controls.Add(buttons);
             Label tip = new Label
             {
                 Dock = DockStyle.Fill, AutoSize = false, Height = 48, AutoEllipsis = true, ForeColor = SystemColors.GrayText, Padding = new Padding(0, 6, 0, 0),
@@ -86,10 +125,23 @@ namespace CadAiDesigner
             layout.Controls.Add(status, 0, 0);
             layout.Controls.Add(chat, 0, 1);
             layout.Controls.Add(prompt, 0, 2);
-            layout.Controls.Add(buttons, 0, 3);
+            layout.Controls.Add(cmdHost, 0, 3);
             layout.Controls.Add(tip, 0, 4);
             Controls.Add(layout);
-            Resize += (s, e) => { buttons.MaximumSize = new Size(Math.Max(60, layout.ClientSize.Width - 16), 0); layout.PerformLayout(); };
+            Action fitCommands = () =>
+            {
+                if (IsDisposed) return;
+                int w = Math.Max(60, layout.ClientSize.Width - layout.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 2);
+                buttons.MaximumSize = new Size(w, 0);
+                foreach (FlowLayoutPanel fg in groups) fg.MaximumSize = new Size(w, 0);
+                buttons.PerformLayout();
+                int want = buttons.GetPreferredSize(new Size(w, 0)).Height + 6;
+                int cap = Math.Max(90, layout.ClientSize.Height * 45 / 100); // keep room for the chat log and prompt
+                layout.RowStyles[3].Height = Math.Min(want, cap);
+                layout.PerformLayout();
+            };
+            Resize += (s, e) => fitCommands();
+            Load += (s, e) => fitCommands();
 
             SelectionState.Changed += OnSelectionChanged;
             Commands.ApplyFinished += OnApplyFinished;
@@ -108,6 +160,22 @@ namespace CadAiDesigner
             b.Text = text; b.AutoSize = true; b.Padding = new Padding(4, 0, 4, 0); b.Click += click;
         }
 
+        void Tip(Control c, string text) { tips.SetToolTip(c, WrapTip(text, 60)); }
+
+        /// <summary>Breaks a tooltip into lines of at most ~width characters (ToolTip does not wrap on its own).</summary>
+        static string WrapTip(string s, int width)
+        {
+            System.Text.StringBuilder b = new System.Text.StringBuilder(s.Length + 8);
+            int line = 0;
+            foreach (string w in s.Split(' '))
+            {
+                if (line > 0 && line + 1 + w.Length > width) { b.Append('\n'); line = 0; }
+                else if (line > 0) { b.Append(' '); line++; }
+                b.Append(w); line += w.Length;
+            }
+            return b.ToString();
+        }
+
         protected override void Dispose(bool disposing)
         {
             if (disposing)
@@ -116,6 +184,7 @@ namespace CadAiDesigner
                 Commands.ApplyFinished -= OnApplyFinished;
                 Metraj.Finished -= OnMetraj;
                 RefPoints.Changed -= OnRefChanged;
+                tips.Dispose();
                 try { AcadApp.DocumentManager.DocumentActivated -= OnDocumentActivated; } catch (System.Exception) { }
                 try
                 {
