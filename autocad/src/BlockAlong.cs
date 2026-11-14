@@ -93,8 +93,8 @@ namespace CadAiDesigner
                     }
                     PolylineVertex3d v3 = o as PolylineVertex3d;
                     if (v3 == null) continue;
-                    if (v3.VertexType == PolylineVertex3dType.ControlVertex) { spline = true; continue; }
-                    if (v3.VertexType == PolylineVertex3dType.FitVertex) { spline = true; Push(fit, fitArcs, v3.Position, false); continue; }
+                    if (v3.VertexType == Vertex3dType.ControlVertex) { spline = true; continue; }
+                    if (v3.VertexType == Vertex3dType.FitVertex) { spline = true; Push(fit, fitArcs, v3.Position, false); continue; }
                     Push(pts, arcs, v3.Position, false);
                 }
             }
