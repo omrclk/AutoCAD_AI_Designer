@@ -14,7 +14,7 @@ namespace CadAiDesigner
     /// stretches it to the segment length (dynamic length parameter if present, otherwise X scale).</summary>
     internal static class BlockAlong
     {
-        internal struct Seg { public Point3d S, E; public bool Arc; public bool Loop; public double Len { get { return S.DistanceTo(E); } } }
+        internal struct Seg { public Point3d S, E; public bool Arc; public double Len { get { return S.DistanceTo(E); } } }
 
         /// <summary>Repeated first/last vertex, or a zero-length spike, closer than this is the same point.</summary>
         const double VertexTol = 1e-6;
@@ -23,8 +23,7 @@ namespace CadAiDesigner
         static readonly string[] WidthNames = { "Width", "Genislik", "Genişlik", "En", "W", "Distance2", "Tava Genişliği", "Genislik1" };
 
         /// <summary>Straight chords of a line or polyline. A closed polyline (Closed flag, with or without a
-        /// duplicated last vertex) is a loop: the edge from the last vertex back to the first is included and
-        /// every edge is marked <see cref="Seg.Loop"/>.</summary>
+        /// duplicated last vertex) includes the edge from the last vertex back to the first.</summary>
         public static List<Seg> Segments(Transaction tx, Entity ent)
         {
             List<Seg> r = new List<Seg>();
@@ -146,7 +145,7 @@ namespace CadAiDesigner
         }
 
         /// <summary>Emits one chord per edge. When <paramref name="closed"/> is set, or the last vertex repeats the first,
-        /// the return edge is included and the run is a loop (no free ends).</summary>
+        /// the return edge is included.</summary>
         static void AddChain(List<Seg> r, List<Point3d> pts, List<bool> arcs, bool closed)
         {
             if (pts.Count >= 2 && pts[0].DistanceTo(pts[pts.Count - 1]) <= VertexTol)
@@ -156,13 +155,13 @@ namespace CadAiDesigner
                 closed = true;
             }
             if (pts.Count < 2) return;
-            bool loop = closed && pts.Count >= 3;
-            int n = loop ? pts.Count : pts.Count - 1;
+            bool close = closed && pts.Count >= 3;
+            int n = close ? pts.Count : pts.Count - 1;
             for (int i = 0; i < n; i++)
             {
-                int j = loop ? (i + 1) % pts.Count : i + 1;
+                int j = close ? (i + 1) % pts.Count : i + 1;
                 bool arc = i < arcs.Count && arcs[i];
-                r.Add(new Seg { S = pts[i], E = pts[j], Arc = arc, Loop = loop });
+                r.Add(new Seg { S = pts[i], E = pts[j], Arc = arc });
             }
         }
 

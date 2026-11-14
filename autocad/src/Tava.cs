@@ -40,8 +40,8 @@ namespace CadAiDesigner
         public static readonly double[] Standard = { 50, 100, 150, 200, 300, 400, 500, 600 };
         public const double MinGap = 30, MaxGap = 700;
 
-        public class Line2 { public Point2d S, E; public double W; public bool Loop; public Line2(Point2d s, Point2d e, double w = 0, bool loop = false) { S = s; E = e; W = w; Loop = loop; } public double Len { get { return S.GetDistanceTo(E); } } }
-        public class Center { public Point2d S, E; public double En; public bool Pair; public bool Loop; }
+        public class Line2 { public Point2d S, E; public double W; public Line2(Point2d s, Point2d e, double w = 0) { S = s; E = e; W = w; } public double Len { get { return S.GetDistanceTo(E); } } }
+        public class Center { public Point2d S, E; public double En; public bool Pair; }
 
         /// <summary>Nearest standard width when within 15 %, otherwise the measured value rounded to 1.</summary>
         public static double Snap(double d) { return Snap(d, 1); }
@@ -79,22 +79,32 @@ namespace CadAiDesigner
             double minGap = MinGap * k, maxGap0 = MaxGap * k, eps = Math.Min(1, 1 * k * 10);
             pairs = singles = ignored = 0;
             List<Center> res = new List<Center>();
+            if (string.Equals(mode, "Eksen", StringComparison.OrdinalIgnoreCase))
+            {
+                // Centreline mode: every edge is a tray axis at defEn. No double-line pairing.
+                // Overlapping copies of the same edge (shared sides of adjacent closed polylines) collapse to one.
+                foreach (Line2 a in MergeOverlaps(lines, Math.Max(k, 1e-4)))
+                {
+                    if (a.Len < 1e-6) continue;
+                    Point2d s = a.S, e = a.E; Normalize(ref s, ref e);
+                    res.Add(new Center { S = s, E = e, En = defEn });
+                    singles++;
+                }
+                return res;
+            }
             bool[] used = new bool[lines.Count];
             double maxGap = 0;
             if (mode != "Tek")
             {
                 for (int i = 0; i < lines.Count; i++)
                 {
-                    // A closed polyline is a centreline loop (every edge, including the return to the
-                    // first vertex). Its sides are not the two rails of a double-line tray.
-                    if (lines[i].Loop || lines[i].Len < 1e-9) continue;
                     Line2 a = lines[i];
                     Vector2d u = (a.E - a.S).GetNormal();
                     Vector2d n = new Vector2d(-u.Y, u.X);
                     double best = double.MaxValue; List<int> cand = new List<int>();
                     for (int j = 0; j < lines.Count; j++)
                     {
-                        if (j == i || lines[j].Loop || lines[j].Len < 1e-9) continue;
+                        if (j == i) continue;
                         Line2 b = lines[j];
                         Vector2d ub = (b.E - b.S).GetNormal();
                         if (Math.Abs(u.X * ub.Y - u.Y * ub.X) > 0.01) continue;           // not parallel (~0.6°)
@@ -122,13 +132,53 @@ namespace CadAiDesigner
             {
                 if (used[i]) continue;
                 Line2 a = lines[i];
-                // Loop edges stay centrelines in every mode (they are not end caps).
-                if (!a.Loop && (mode == "Cift" || (pairs > 0 && mode == "Otomatik"))) { ignored++; continue; }
+                if (mode == "Cift" || (pairs > 0 && mode == "Otomatik")) { ignored++; continue; }   // end caps / unrelated lines in a double-line plan
                 Point2d s = a.S, e = a.E; Normalize(ref s, ref e);
-                res.Add(new Center { S = s, E = e, En = a.W > 1e-6 ? Snap(a.W, k) : defEn, Loop = a.Loop });
+                res.Add(new Center { S = s, E = e, En = a.W > 1e-6 ? Snap(a.W, k) : defEn });
                 singles++;
             }
             return res;
+        }
+
+        /// <summary>Collinear segments that overlap (not merely touch) become their union. Parallel rails stay separate.</summary>
+        static List<Line2> MergeOverlaps(List<Line2> src, double tol)
+        {
+            List<Line2> cur = new List<Line2>();
+            foreach (Line2 ln in src) if (ln != null && ln.Len > 1e-6) cur.Add(ln);
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (int i = 0; i < cur.Count && !changed; i++)
+                {
+                    for (int j = i + 1; j < cur.Count; j++)
+                    {
+                        Line2 a = cur[i], b = cur[j];
+                        Vector2d d = a.E - a.S;
+                        double len = Math.Sqrt(d.X * d.X + d.Y * d.Y);
+                        if (len < 1e-9) continue;
+                        Vector2d u = d / len;
+                        Vector2d db = b.E - b.S;
+                        double bl = Math.Sqrt(db.X * db.X + db.Y * db.Y);
+                        if (bl < 1e-9) continue;
+                        Vector2d ub = db / bl;
+                        if (Math.Abs(u.X * ub.Y - u.Y * ub.X) > 0.01) continue;
+                        Vector2d n = new Vector2d(-u.Y, u.X);
+                        if (Math.Abs((b.S - a.S).DotProduct(n)) > tol) continue;
+                        if (Math.Abs((b.E - a.S).DotProduct(n)) > tol) continue;
+                        double t0 = (b.S - a.S).DotProduct(u), t1 = (b.E - a.S).DotProduct(u);
+                        double lo = Math.Min(t0, t1), hi = Math.Max(t0, t1);
+                        double ov = Math.Min(len, hi) - Math.Max(0, lo);
+                        if (ov <= tol) continue;
+                        double u0 = Math.Min(0, lo), u1 = Math.Max(len, hi);
+                        cur[i] = new Line2(a.S + u * u0, a.S + u * u1, Math.Max(a.W, b.W));
+                        cur.RemoveAt(j);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            return cur;
         }
 
         static double Overlap(Line2 a, Line2 b)
@@ -221,10 +271,11 @@ namespace CadAiDesigner
                 bool autoEn = true;
                 while (true)
                 {
-                    string msg = "\nEN=" + (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en)) +
+                    bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
+                    string msg = "\nEN=" + (eksen ? F(ts.en) + " (eksen, çift çizgi yok)" : (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en))) +
                                  ", Y=" + ts.yukseklik + ", t=" + ts.kalinlik + ", Mod=" + ts.mod + ", Bağlantı=" + (ts.baglanti ? "Evet" : "Hayir") +
-                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Baglanti/Devam] <Devam>: ";
-                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Baglanti Devam") { AllowNone = true };
+                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Baglanti/Devam] <Devam>: ";
+                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Baglanti Devam") { AllowNone = true };
                     PromptResult kr = ed.GetKeywords(ko);
                     if (kr.Status == PromptStatus.Cancel) return;
                     if (kr.Status == PromptStatus.None || kr.StringResult == "Devam") break;
@@ -276,6 +327,17 @@ namespace CadAiDesigner
                                 if (r.Status == PromptStatus.OK) ts.mod = r.StringResult;
                                 break;
                             }
+                        case "Eksen":
+                            {
+                                double def = ts.en > 0 ? ts.en : 300;
+                                PromptDoubleOptions d = new PromptDoubleOptions("\nEksen EN (çizgi/polyline = tava ekseni, 100/200/300 veya serbest): ") { AllowNone = true, AllowNegative = false, AllowZero = false, DefaultValue = def, UseDefaultValue = true };
+                                PromptDoubleResult r = ed.GetDouble(d);
+                                if (r.Status == PromptStatus.Cancel) return;
+                                if (r.Status == PromptStatus.OK) ts.en = r.Value;
+                                else if (ts.en <= 0) ts.en = def;
+                                ts.mod = "Eksen";
+                                break;
+                            }
                         case "Baglanti":
                             {
                                 PromptKeywordOptions bo = new PromptKeywordOptions("\nArdından ek parçalar (AIDBAGLANTI) [Evet/Hayir] <" + (ts.baglanti ? "Evet" : "Hayir") + ">: ", "Evet Hayir") { AllowNone = true };
@@ -290,7 +352,7 @@ namespace CadAiDesigner
 
                 // 3) everything in one transaction = one UNDO step
                 ApplyResult res = new ApplyResult();
-                int pairs, singles, ignored, dups = 0, arcs = 0, loopEdges = 0;
+                int pairs, singles, ignored, dups = 0, arcs = 0;
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -305,15 +367,16 @@ namespace CadAiDesigner
                         Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
                         if (e == null || e.Layer.Equals(ts.layer, StringComparison.OrdinalIgnoreCase) && e is BlockReference) continue;
                         double w = 0; Polyline pl = e as Polyline; if (pl != null) { try { w = pl.ConstantWidth; } catch (System.Exception) { } }
-                        foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w, s.Loop)); }
+                        foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w)); }
                     }
                     double unit = TavaGeo.UnitsPerMm(db.Insunits);
+                    bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
+                    if (eksen && ts.en <= 0) ts.en = 300;
                     List<TavaGeo.Center> cl = TavaGeo.Build(lines, ts.mod, ts.en, unit, out pairs, out singles, out ignored);
-                    if (!autoEn) foreach (TavaGeo.Center c in cl) c.En = ts.en;
+                    if (eksen || !autoEn) foreach (TavaGeo.Center c in cl) c.En = ts.en;
 
-                    // existing trays (duplicate check). Item4 = this run's closed-loop edge.
-                    // Loop edges of one route sit EN/2 apart on a narrow rectangle; that is not the same tray.
-                    double loopTol = Math.Max(unit, 1e-4);
+                    // existing trays (duplicate check). Item4 = placed in this Eksen run (only exact overlaps count).
+                    double axisTol = Math.Max(unit, 1e-4);
                     List<Tuple<Point2d, Point2d, double, bool>> have = new List<Tuple<Point2d, Point2d, double, bool>>();
                     foreach (ObjectId id in ms)
                     {
@@ -331,7 +394,7 @@ namespace CadAiDesigner
                     foreach (TavaGeo.Center c in cl)
                     {
                         if (c.S.GetDistanceTo(c.E) < 1) continue;
-                        if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, (c.Loop && h.Item4) ? loopTol : Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
+                        if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, (eksen && h.Item4) ? axisTol : Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
                         Vector2d u = (c.E - c.S).GetNormal(); Vector2d n = new Vector2d(-u.Y, u.X);
                         Point2d p = c.S - n * (c.En / 2);
                         BlockReference br = new BlockReference(new Point3d(p.X, p.Y, 0), btrId);
@@ -346,9 +409,8 @@ namespace CadAiDesigner
                         SetAttr(tx, br, cfg.height_props, ts.yukseklik);
                         SetAttr(tx, br, cfg.thickness_props, ts.kalinlik);
                         BlockAlong.RefreshHatches(tx, br);
-                        have.Add(Tuple.Create(c.S, c.E, c.En, c.Loop));
+                        have.Add(Tuple.Create(c.S, c.E, c.En, eksen));
                         created.Add(br.ObjectId);
-                        if (c.Loop) loopEdges++;
                         res.Created++;
                     }
 
@@ -381,7 +443,7 @@ namespace CadAiDesigner
                         List<Dictionary<string, object>> items = Takeoff.Compute(db, rq, kn, tx);
                         tx.Abort();
                         kn.RemoveAll(x => x.Contains("Model alan"));
-                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (loopEdges > 0 ? ", kapalı hat " + loopEdges + " kenar" : "") + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
+                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
                         string ks = Metraj.Send(doc, items, kn, "plankesif");
                         ed.WriteMessage("\nPlandan keşif: " + ks + "\n");
                         Metraj.Raise("Plandan keşif: " + ks);
@@ -390,7 +452,6 @@ namespace CadAiDesigner
                     tx.Commit();
                     string sum = created.Count + " tava yerleştirildi (katman " + layer + ")" +
                                  (pairs > 0 ? ", çift çizgi: " + pairs : "") + (singles > 0 ? ", tek çizgi: " + singles : "") +
-                                 (loopEdges > 0 ? ", kapalı hat: " + loopEdges + " kenar" : "") +
                                  (dups > 0 ? ", mevcut tavayla çakışan " + dups + " atlandı" : "") +
                                  (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") +
                                  (arcs > 0 ? ", " + arcs + " yay kiriş olarak alındı" : "") + "." + fit +
