@@ -247,7 +247,17 @@ namespace CadAiDesigner
                 if (n == null) nodes.Add(n = new Node { P = p });
                 n.Kinds[i] = ki; n.Kinds[j] = kj;
             };
-            Func<double, TrayRun, double, int> kind = (t, r, te) => t < -te || t > r.L + te ? -1 : Math.Abs(t) <= te ? 0 : Math.Abs(t - r.L) <= te ? 1 : 2;
+            // 0 = start, 1 = end, 2 = along the run, -1 = miss.
+            // On a short side (shorter than the other tray's width) both ends fall inside te;
+            // the nearer end is the real one, so a closed-loop corner still trims that end.
+            Func<double, TrayRun, double, int> kind = (t, r, te) =>
+            {
+                if (t < -te || t > r.L + te) return -1;
+                double ds = Math.Abs(t), de = Math.Abs(t - r.L);
+                if (ds <= te && ds <= de) return 0;
+                if (de <= te) return 1;
+                return 2;
+            };
 
             for (int i = 0; i < runs.Count; i++)
                 for (int j = i + 1; j < runs.Count; j++)

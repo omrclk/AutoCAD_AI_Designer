@@ -40,8 +40,8 @@ namespace CadAiDesigner
         public static readonly double[] Standard = { 50, 100, 150, 200, 300, 400, 500, 600 };
         public const double MinGap = 30, MaxGap = 700;
 
-        public class Line2 { public Point2d S, E; public double W; public Line2(Point2d s, Point2d e, double w = 0) { S = s; E = e; W = w; } public double Len { get { return S.GetDistanceTo(E); } } }
-        public class Center { public Point2d S, E; public double En; public bool Pair; }
+        public class Line2 { public Point2d S, E; public double W; public bool Loop; public Line2(Point2d s, Point2d e, double w = 0, bool loop = false) { S = s; E = e; W = w; Loop = loop; } public double Len { get { return S.GetDistanceTo(E); } } }
+        public class Center { public Point2d S, E; public double En; public bool Pair; public bool Loop; }
 
         /// <summary>Nearest standard width when within 15 %, otherwise the measured value rounded to 1.</summary>
         public static double Snap(double d) { return Snap(d, 1); }
@@ -85,13 +85,16 @@ namespace CadAiDesigner
             {
                 for (int i = 0; i < lines.Count; i++)
                 {
+                    // A closed polyline is a centreline loop (every edge, including the return to the
+                    // first vertex). Its sides are not the two rails of a double-line tray.
+                    if (lines[i].Loop || lines[i].Len < 1e-9) continue;
                     Line2 a = lines[i];
                     Vector2d u = (a.E - a.S).GetNormal();
                     Vector2d n = new Vector2d(-u.Y, u.X);
                     double best = double.MaxValue; List<int> cand = new List<int>();
                     for (int j = 0; j < lines.Count; j++)
                     {
-                        if (j == i) continue;
+                        if (j == i || lines[j].Loop || lines[j].Len < 1e-9) continue;
                         Line2 b = lines[j];
                         Vector2d ub = (b.E - b.S).GetNormal();
                         if (Math.Abs(u.X * ub.Y - u.Y * ub.X) > 0.01) continue;           // not parallel (~0.6°)
@@ -119,9 +122,10 @@ namespace CadAiDesigner
             {
                 if (used[i]) continue;
                 Line2 a = lines[i];
-                if (mode == "Cift" || (pairs > 0 && mode == "Otomatik")) { ignored++; continue; }   // end caps / unrelated lines in a double-line plan
+                // Loop edges stay centrelines in every mode (they are not end caps).
+                if (!a.Loop && (mode == "Cift" || (pairs > 0 && mode == "Otomatik"))) { ignored++; continue; }
                 Point2d s = a.S, e = a.E; Normalize(ref s, ref e);
-                res.Add(new Center { S = s, E = e, En = a.W > 1e-6 ? Snap(a.W, k) : defEn });
+                res.Add(new Center { S = s, E = e, En = a.W > 1e-6 ? Snap(a.W, k) : defEn, Loop = a.Loop });
                 singles++;
             }
             return res;
@@ -185,7 +189,7 @@ namespace CadAiDesigner
                 {
                     using (Transaction tx = db.TransactionManager.StartTransaction())
                     {
-                        ids = sr.Value.GetObjectIds().Where(id => { Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity; return e is Line || e is Polyline || e is Polyline2d; }).ToList();
+                        ids = sr.Value.GetObjectIds().Where(id => { Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity; return e is Line || e is Polyline || e is Polyline2d || e is Polyline3d; }).ToList();
                         tx.Commit();
                     }
                     if (ids.Count == 0) ids = null;
@@ -286,7 +290,7 @@ namespace CadAiDesigner
 
                 // 3) everything in one transaction = one UNDO step
                 ApplyResult res = new ApplyResult();
-                int pairs, singles, ignored, dups = 0, arcs = 0;
+                int pairs, singles, ignored, dups = 0, arcs = 0, loopEdges = 0;
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -301,13 +305,16 @@ namespace CadAiDesigner
                         Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
                         if (e == null || e.Layer.Equals(ts.layer, StringComparison.OrdinalIgnoreCase) && e is BlockReference) continue;
                         double w = 0; Polyline pl = e as Polyline; if (pl != null) { try { w = pl.ConstantWidth; } catch (System.Exception) { } }
-                        foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w)); }
+                        foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w, s.Loop)); }
                     }
-                    List<TavaGeo.Center> cl = TavaGeo.Build(lines, ts.mod, ts.en, TavaGeo.UnitsPerMm(db.Insunits), out pairs, out singles, out ignored);
+                    double unit = TavaGeo.UnitsPerMm(db.Insunits);
+                    List<TavaGeo.Center> cl = TavaGeo.Build(lines, ts.mod, ts.en, unit, out pairs, out singles, out ignored);
                     if (!autoEn) foreach (TavaGeo.Center c in cl) c.En = ts.en;
 
-                    // existing trays (duplicate check)
-                    List<Tuple<Point2d, Point2d, double>> have = new List<Tuple<Point2d, Point2d, double>>();
+                    // existing trays (duplicate check). Item4 = this run's closed-loop edge.
+                    // Loop edges of one route sit EN/2 apart on a narrow rectangle; that is not the same tray.
+                    double loopTol = Math.Max(unit, 1e-4);
+                    List<Tuple<Point2d, Point2d, double, bool>> have = new List<Tuple<Point2d, Point2d, double, bool>>();
                     foreach (ObjectId id in ms)
                     {
                         BlockReference br = tx.GetObject(id, OpenMode.ForRead) as BlockReference;
@@ -315,7 +322,7 @@ namespace CadAiDesigner
                         Fittings.TrayRun r = Fittings.MakeRun(br, cfg);
                         if (r == null) continue;
                         Point3d b = r.A + r.U * r.L;
-                        have.Add(Tuple.Create(new Point2d(r.A.X, r.A.Y), new Point2d(b.X, b.Y), r.W));
+                        have.Add(Tuple.Create(new Point2d(r.A.X, r.A.Y), new Point2d(b.X, b.Y), r.W, false));
                     }
 
                     if (kesif) have.Clear();   // plan keşif: count the whole plan, ignore trays already drawn
@@ -324,7 +331,7 @@ namespace CadAiDesigner
                     foreach (TavaGeo.Center c in cl)
                     {
                         if (c.S.GetDistanceTo(c.E) < 1) continue;
-                        if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
+                        if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, (c.Loop && h.Item4) ? loopTol : Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
                         Vector2d u = (c.E - c.S).GetNormal(); Vector2d n = new Vector2d(-u.Y, u.X);
                         Point2d p = c.S - n * (c.En / 2);
                         BlockReference br = new BlockReference(new Point3d(p.X, p.Y, 0), btrId);
@@ -339,8 +346,9 @@ namespace CadAiDesigner
                         SetAttr(tx, br, cfg.height_props, ts.yukseklik);
                         SetAttr(tx, br, cfg.thickness_props, ts.kalinlik);
                         BlockAlong.RefreshHatches(tx, br);
-                        have.Add(Tuple.Create(c.S, c.E, c.En));
+                        have.Add(Tuple.Create(c.S, c.E, c.En, c.Loop));
                         created.Add(br.ObjectId);
+                        if (c.Loop) loopEdges++;
                         res.Created++;
                     }
 
@@ -373,7 +381,7 @@ namespace CadAiDesigner
                         List<Dictionary<string, object>> items = Takeoff.Compute(db, rq, kn, tx);
                         tx.Abort();
                         kn.RemoveAll(x => x.Contains("Model alan"));
-                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
+                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (loopEdges > 0 ? ", kapalı hat " + loopEdges + " kenar" : "") + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
                         string ks = Metraj.Send(doc, items, kn, "plankesif");
                         ed.WriteMessage("\nPlandan keşif: " + ks + "\n");
                         Metraj.Raise("Plandan keşif: " + ks);
@@ -382,6 +390,7 @@ namespace CadAiDesigner
                     tx.Commit();
                     string sum = created.Count + " tava yerleştirildi (katman " + layer + ")" +
                                  (pairs > 0 ? ", çift çizgi: " + pairs : "") + (singles > 0 ? ", tek çizgi: " + singles : "") +
+                                 (loopEdges > 0 ? ", kapalı hat: " + loopEdges + " kenar" : "") +
                                  (dups > 0 ? ", mevcut tavayla çakışan " + dups + " atlandı" : "") +
                                  (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") +
                                  (arcs > 0 ? ", " + arcs + " yay kiriş olarak alındı" : "") + "." + fit +
