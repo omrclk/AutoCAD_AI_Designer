@@ -90,6 +90,7 @@ namespace CadAiDesigner
                     res.Add(new Center { S = s, E = e, En = defEn });
                     singles++;
                 }
+                CollapseRuns(res, false);
                 return res;
             }
             bool[] used = new bool[lines.Count];
@@ -137,7 +138,48 @@ namespace CadAiDesigner
                 res.Add(new Center { S = s, E = e, En = a.W > 1e-6 ? Snap(a.W, k) : defEn });
                 singles++;
             }
+            CollapseRuns(res, true);
             return res;
+        }
+
+        /// <summary>One tray per run. wide: centre lines up to one tray-width apart are the same double-line
+        /// pair (outer polyline edge + inner line). Otherwise only near-coincident copies collapse.</summary>
+        static void CollapseRuns(List<Center> res, bool wide)
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (int i = 0; i < res.Count && !changed; i++)
+                {
+                    for (int j = i + 1; j < res.Count; j++)
+                    {
+                        Center a = res[i], b = res[j];
+                        double len = a.S.GetDistanceTo(a.E), bl = b.S.GetDistanceTo(b.E);
+                        if (len < 1e-6 || bl < 1e-6) continue;
+                        if (bl > len) { Center tmp = a; a = b; b = tmp; double tl = len; len = bl; bl = tl; }
+                        Vector2d u = (a.E - a.S) / len, ub = (b.E - b.S) / bl;
+                        if (Math.Abs(u.X * ub.Y - u.Y * ub.X) > 0.01) continue;
+                        Vector2d n = new Vector2d(-u.Y, u.X);
+                        double lat = Math.Max(Math.Abs((b.S - a.S).DotProduct(n)), Math.Abs((b.E - a.S).DotProduct(n)));
+                        double allow = wide ? Math.Max(a.En, b.En) : Math.Max(a.En, b.En) * 0.05;
+                        if (allow < 1e-4) allow = 1e-4;
+                        if (lat > allow) continue;
+                        double t0 = (b.S - a.S).DotProduct(u), t1 = (b.E - a.S).DotProduct(u);
+                        double lo = Math.Min(t0, t1), hi = Math.Max(t0, t1);
+                        double ov = Math.Min(len, hi) - Math.Max(0, lo);
+                        if (ov < 0.5 * Math.Min(len, bl)) continue;
+                        double u0 = Math.Min(0, lo), u1 = Math.Max(len, hi);
+                        Point2d s = a.S + u * u0, e = a.S + u * u1;
+                        double en = a.Pair && !b.Pair ? a.En : b.Pair && !a.Pair ? b.En : Math.Max(a.En, b.En);
+                        Normalize(ref s, ref e);
+                        res[i] = new Center { S = s, E = e, En = en, Pair = a.Pair || b.Pair };
+                        res.RemoveAt(j);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
         }
 
         /// <summary>Collinear segments that overlap (not merely touch) become their union. Parallel rails stay separate.</summary>

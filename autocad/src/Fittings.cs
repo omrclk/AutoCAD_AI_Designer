@@ -267,7 +267,9 @@ namespace CadAiDesigner
                     }
                     Vector3d w = b.A - a.A;
                     double t = Cross(w, b.U) / cr, s = Cross(w, a.U) / cr;
-                    int ki = kind(t, a, b.W + tol), kj = kind(s, b, a.W + tol);
+                    // A branch drawn up to the other tray's edge stops half a width short of that centreline.
+                    // Farther than that (plus tolerance) is a dead end and is not extended.
+                    int ki = kind(t, a, b.W * 0.5 + tol), kj = kind(s, b, a.W * 0.5 + tol);
                     if (ki < 0 || kj < 0) continue;
                     hit(a.A + a.U * t, i, ki, j, kj);
                 }
@@ -281,7 +283,8 @@ namespace CadAiDesigner
                     if (kv.Value == 0 || kv.Value == 2) arms.Add(Tuple.Create(kv.Key, kv.Value, r.U));
                     if (kv.Value == 1 || kv.Value == 2) arms.Add(Tuple.Create(kv.Key, kv.Value, -r.U));
                 }
-                // drop duplicated collinear arms from two overlapping trays
+                arms = UniqueArms(arms);
+                if (arms.Count < 2) continue;
                 Placement pl = null;
                 Point3d C = n.P;
                 string layer = runs[arms[0].Item1].Br.Layer;
@@ -295,8 +298,8 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     short flip = (short)(Rot(-1, 0, r).DotProduct(b) > 0 ? 1 : 0);
                     pl = new Placement { Type = "YD", P = C - b * (ra.W / 2) + a * (cfg.clearance + rb.W / 2), Rot = r, Flip = flip, W1 = ra.W, W2 = rb.W, Layer = layer };
-                    AddCut(ra, arms[0].Item2, a, C, Leg(cfg, "YD") + rb.W / 2);
-                    AddCut(rb, arms[1].Item2, b, C, Leg(cfg, "YD") + ra.W / 2);
+                    AddCut(ra, arms[0].Item2, a, C, Reach(cfg, "YD") + rb.W / 2);
+                    AddCut(rb, arms[1].Item2, b, C, Reach(cfg, "YD") + ra.W / 2);
                 }
                 else if (arms.Count == 3)
                 {
@@ -315,11 +318,8 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     string type = Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant();
-                    FitType tft = null; if (cfg.types != null) cfg.types.TryGetValue(type, out tft);
-                    double leg = tft != null && tft.leg.HasValue ? tft.leg.Value : cfg.clearance;
-                    // insertion stays where the block expects it; only the branch cut follows the real leg length
                     pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = wm, Layer = layer };
-                    AddCut(rb, br.Item2, a, C, leg + wm / 2);
+                    AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
                     {
                         // half-T sits on the main tray's edge: the main stays continuous. Two main pieces ending at the
@@ -329,8 +329,8 @@ namespace CadAiDesigner
                     }
                     if (type == "YT")
                     {
-                        AddCut(runs[m1.Item1], m1.Item2, m1.Item3, C, Leg(cfg, type) + wb / 2);
-                        AddCut(runs[m2.Item1], m2.Item2, m2.Item3, C, Leg(cfg, type) + wb / 2);
+                        AddCut(runs[m1.Item1], m1.Item2, m1.Item3, C, Reach(cfg, type) + wb / 2);
+                        AddCut(runs[m2.Item1], m2.Item2, m2.Item3, C, Reach(cfg, type) + wb / 2);
                     }
                 }
                 else if (arms.Count == 4)
@@ -351,9 +351,9 @@ namespace CadAiDesigner
                     double r = Math.Atan2(u.Y, u.X) - Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     pl = new Placement { Type = "AD", P = C - lx * (w1 / 2) - u * (cfg.clearance + w2 / 2), Rot = r, W1 = w1, W2 = w2, Layer = layer };
-                    AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Leg(cfg, "AD") + w2 / 2);
-                    AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Leg(cfg, "AD") + w2 / 2);
-                    foreach (int k in others) AddCut(runs[arms[k].Item1], arms[k].Item2, arms[k].Item3, C, Leg(cfg, "AD") + w1 / 2);
+                    AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + w2 / 2);
+                    AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + w2 / 2);
+                    foreach (int k in others) AddCut(runs[arms[k].Item1], arms[k].Item2, arms[k].Item3, C, Reach(cfg, "AD") + w1 / 2);
                 }
                 else { plan.Notes.Add("Tanınmayan birleşim " + Pt(C) + " (" + arms.Count + " kol)."); continue; }
 
@@ -383,6 +383,26 @@ namespace CadAiDesigner
         {
             FitType ft = null; if (cfg.types != null) cfg.types.TryGetValue(type, out ft);
             return ft != null && ft.leg.HasValue ? ft.leg.Value : 50;
+        }
+
+        /// <summary>How far to pull a tray back from the centreline junction so it stops at the fitting, not inside it.</summary>
+        static double Reach(FitConfig cfg, string type)
+        {
+            return Math.Max(Leg(cfg, type), cfg.clearance);
+        }
+
+        /// <summary>Overlapping trays on the same run produce two arms in one direction. Keep one per direction.</summary>
+        static List<Tuple<int, int, Vector3d>> UniqueArms(List<Tuple<int, int, Vector3d>> arms)
+        {
+            List<Tuple<int, int, Vector3d>> u = new List<Tuple<int, int, Vector3d>>();
+            foreach (Tuple<int, int, Vector3d> a in arms)
+            {
+                bool same = false;
+                foreach (Tuple<int, int, Vector3d> b in u)
+                    if (a.Item3.DotProduct(b.Item3) > 0.95) { same = true; break; }
+                if (!same) u.Add(a);
+            }
+            return u;
         }
 
         static void AddCut(TrayRun r, int kind, Vector3d arm, Point3d c, double d)
