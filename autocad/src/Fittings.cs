@@ -19,7 +19,9 @@ namespace CadAiDesigner
         public string w1 { get; set; }
         public string w2 { get; set; }
         public string flip { get; set; }
-        /// <summary>Branch leg length past the main tray edge for this fitting (null = clearance). Half-T legs are shorter.</summary>
+        /// <summary>How far the tray is cut back past the other tray's edge, to the fitting's connection face.
+        /// Not the block insertion offset (clearance). For the stock fittings block that face is 60
+        /// (insertion 164, trays were 104 short of the face).</summary>
         public double? leg { get; set; }
     }
 
@@ -40,10 +42,10 @@ namespace CadAiDesigner
         public string unequal_t { get; set; } = "YARIM_T";
         public Dictionary<string, FitType> types { get; set; } = new Dictionary<string, FitType>
         {
-            { "YD", new FitType { leg = 50, state = "YD", w1 = "YD1", w2 = "YD2", flip = "YD flip" } },
-            { "YT", new FitType { leg = 50, state = "YT", w1 = "YT1", w2 = "YT2" } },
-            { "YARIM_T", new FitType { state = "YT-Yarım", w1 = "YT Yarım A", w2 = null, leg = 50 } },
-            { "AD", new FitType { leg = 50, state = "AD", w1 = "AD1", w2 = "AD2" } },
+            { "YD", new FitType { leg = 60, state = "YD", w1 = "YD1", w2 = "YD2", flip = "YD flip" } },
+            { "YT", new FitType { leg = 60, state = "YT", w1 = "YT1", w2 = "YT2" } },
+            { "YARIM_T", new FitType { state = "YT-Yarım", w1 = "YT Yarım A", w2 = null, leg = 60 } },
+            { "AD", new FitType { leg = 60, state = "AD", w1 = "AD1", w2 = "AD2" } },
         };
 
         /// <summary>Metraj/keşif: candidate property names for height and thickness (matched case/Turkish-insensitive, prefix).</summary>
@@ -68,7 +70,7 @@ namespace CadAiDesigner
                     FitConfig c = js.Deserialize<FitConfig>(File.ReadAllText(FilePath)) ?? new FitConfig();
                     // older files: add newly supported types (e.g. AD) without touching the user's edits
                     if (c.types != null) { FitType y; if (c.types.TryGetValue("YARIM_T", out y) && y != null && y.w1 == "YT1" && !y.leg.HasValue) c.types["YARIM_T"] = new FitConfig().types["YARIM_T"]; }
-                    if (c.types != null) foreach (KeyValuePair<string, FitType> kv in c.types) if (kv.Value != null && !kv.Value.leg.HasValue) kv.Value.leg = 50;
+                    if (c.types != null) foreach (KeyValuePair<string, FitType> kv in c.types) if (kv.Value != null && (!kv.Value.leg.HasValue || kv.Value.leg.Value == 50)) kv.Value.leg = 60;
                     if (c.types != null) foreach (KeyValuePair<string, FitType> kv in new FitConfig().types) if (!c.types.ContainsKey(kv.Key)) c.types[kv.Key] = kv.Value;
                     return c;
                 }
@@ -382,13 +384,14 @@ namespace CadAiDesigner
         static double Leg(FitConfig cfg, string type)
         {
             FitType ft = null; if (cfg.types != null) cfg.types.TryGetValue(type, out ft);
-            return ft != null && ft.leg.HasValue ? ft.leg.Value : 50;
+            return ft != null && ft.leg.HasValue ? ft.leg.Value : 60;
         }
 
-        /// <summary>How far to pull a tray back from the centreline junction so it stops at the fitting, not inside it.</summary>
+        /// <summary>Cut distance past the other tray edge. The block is inserted at <c>clearance</c> (164);
+        /// the connection face is closer (60). Each end of a run is cut once, so a tray between two fittings meets both.</summary>
         static double Reach(FitConfig cfg, string type)
         {
-            return Math.Max(Leg(cfg, type), cfg.clearance);
+            return Leg(cfg, type);
         }
 
         /// <summary>Overlapping trays on the same run produce two arms in one direction. Keep one per direction.</summary>
@@ -409,7 +412,7 @@ namespace CadAiDesigner
         {
             double tc = (c - r.A).DotProduct(r.U);
             bool plus = arm.DotProduct(r.U) > 0;
-            // a tray END at the junction is set exactly to the fitting (trimmed OR extended), so no gap remains
+            // One end only: +U moves the start, -U moves the end. A tray between two fittings keeps both.
             if (kind == 0 || kind == 1)
             {
                 if (plus) r.NewStart = tc + d; else r.NewEnd = tc - d;
