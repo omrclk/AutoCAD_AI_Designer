@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Web.Script.Serialization;
 using Autodesk.AutoCAD.ApplicationServices;
+using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -23,6 +24,17 @@ namespace CadAiDesigner
         public string mod { get; set; } = "Otomatik";
         public string layers { get; set; } = "*";
         public string layer { get; set; } = "E_CT";
+        /// <summary>ACI color → tray width (mm in drawing units). ByLayer uses the layer's ACI.</summary>
+        public List<RenkOlcu> renkler { get; set; } = new List<RenkOlcu>();
+
+        public double EnForRenk(int aci, out bool mapped)
+        {
+            mapped = false;
+            if (renkler != null)
+                foreach (RenkOlcu r in renkler)
+                    if (r != null && r.renk == aci && r.en > 0) { mapped = true; return r.en; }
+            return en > 0 ? en : 300;
+        }
 
         static string FilePath { get { return Path.Combine(AppPaths.Dir, "tava.json"); } }
         public static TavaSettings Load()
@@ -32,6 +44,12 @@ namespace CadAiDesigner
             return new TavaSettings();
         }
         public void Save() { try { File.WriteAllText(FilePath, new JavaScriptSerializer().Serialize(this)); } catch (System.Exception) { } }
+    }
+
+    public class RenkOlcu
+    {
+        public int renk { get; set; }
+        public double en { get; set; }
     }
 
     /// <summary>Pure 2D geometry of AIDTAVA: double-line pairing, EN snapping, centrelines (no AutoCAD objects).</summary>
@@ -272,6 +290,7 @@ namespace CadAiDesigner
             {
                 FitConfig cfg = FitConfig.Load();
                 TavaSettings ts = TavaSettings.Load();
+                if (ts.renkler == null) ts.renkler = new List<RenkOlcu>();
 
                 // 1) selection: pickfirst, picked lines/polylines, or Tumu (all on plan layers)
                 List<ObjectId> ids = null;
@@ -309,15 +328,17 @@ namespace CadAiDesigner
                     ids = sr.Value.GetObjectIds().ToList();
                 }
 
-                // 2) options loop
+                // 2) options loop. renkGrup != null means Renk/Tumu: one EN per color.
                 bool autoEn = true;
+                List<RenkGrup> renkGrup = null;
                 while (true)
                 {
                     bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
                     string msg = "\nEN=" + (eksen ? F(ts.en) + " (eksen, çift çizgi yok)" : (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en))) +
                                  ", Y=" + ts.yukseklik + ", t=" + ts.kalinlik + ", Mod=" + ts.mod + ", Bağlantı=" + (ts.baglanti ? "Evet" : "Hayir") +
-                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Baglanti/Devam] <Devam>: ";
-                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Baglanti Devam") { AllowNone = true };
+                                 (renkGrup != null ? ", Renk=tablo (" + renkGrup.Count + " renk)" : "") +
+                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Renk/RenkTablosu/Baglanti/Devam] <Devam>: ";
+                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Renk RenkTablosu Baglanti Devam") { AllowNone = true };
                     PromptResult kr = ed.GetKeywords(ko);
                     if (kr.Status == PromptStatus.Cancel) return;
                     if (kr.Status == PromptStatus.None || kr.StringResult == "Devam") break;
@@ -380,6 +401,22 @@ namespace CadAiDesigner
                                 ts.mod = "Eksen";
                                 break;
                             }
+                        case "Renk":
+                            {
+                                RenkSecim sec = RenkSec(ed, db, ts);
+                                if (sec == null) return;
+                                if (sec.Ids.Count == 0) { ed.WriteMessage("\nBu renk/katmanda çizgi bulunamadı.\n"); break; }
+                                ids = sec.Ids;
+                                renkGrup = sec.Gruplar;
+                                ed.WriteMessage("\n" + sec.Ozet + "\n");
+                                break;
+                            }
+                        case "RenkTablosu":
+                            {
+                                RenkTablosuDuzenle(ed, ts);
+                                ts.Save();
+                                break;
+                            }
                         case "Baglanti":
                             {
                                 PromptKeywordOptions bo = new PromptKeywordOptions("\nArdından ek parçalar (AIDBAGLANTI) [Evet/Hayir] <" + (ts.baglanti ? "Evet" : "Hayir") + ">: ", "Evet Hayir") { AllowNone = true };
@@ -394,7 +431,7 @@ namespace CadAiDesigner
 
                 // 3) everything in one transaction = one UNDO step
                 ApplyResult res = new ApplyResult();
-                int pairs, singles, ignored, dups = 0, arcs = 0;
+                int pairs = 0, singles = 0, ignored = 0, dups = 0, arcs = 0;
                 using (Transaction tx = db.TransactionManager.StartTransaction())
                 {
                     BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
@@ -403,19 +440,30 @@ namespace CadAiDesigner
                     BlockTableRecord ms = (BlockTableRecord)tx.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
                     HashSet<ObjectId> before = new HashSet<ObjectId>(ms.Cast<ObjectId>());
 
-                    List<TavaGeo.Line2> lines = new List<TavaGeo.Line2>();
-                    foreach (ObjectId id in ids)
-                    {
-                        Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
-                        if (e == null || e.Layer.Equals(ts.layer, StringComparison.OrdinalIgnoreCase) && e is BlockReference) continue;
-                        double w = 0; Polyline pl = e as Polyline; if (pl != null) { try { w = pl.ConstantWidth; } catch (System.Exception) { } }
-                        foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w)); }
-                    }
                     double unit = TavaGeo.UnitsPerMm(db.Insunits);
                     bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
                     if (eksen && ts.en <= 0) ts.en = 300;
-                    List<TavaGeo.Center> cl = TavaGeo.Build(lines, ts.mod, ts.en, unit, out pairs, out singles, out ignored);
-                    if (eksen || !autoEn) foreach (TavaGeo.Center c in cl) c.En = ts.en;
+                    List<TavaGeo.Center> cl = new List<TavaGeo.Center>();
+                    List<RenkGrup> passes = renkGrup != null ? renkGrup : new List<RenkGrup> { new RenkGrup { En = ts.en, Ids = ids } };
+                    bool forceEn = renkGrup != null;
+                    foreach (RenkGrup g in passes)
+                    {
+                        if (g.Ids == null || g.Ids.Count == 0) continue;
+                        List<TavaGeo.Line2> lines = new List<TavaGeo.Line2>();
+                        foreach (ObjectId id in g.Ids)
+                        {
+                            Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                            if (e == null || e.Layer.Equals(ts.layer, StringComparison.OrdinalIgnoreCase) && e is BlockReference) continue;
+                            double w = 0; Polyline pl = e as Polyline; if (pl != null) { try { w = pl.ConstantWidth; } catch (System.Exception) { } }
+                            foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w)); }
+                        }
+                        int p = 0, sng = 0, ign = 0;
+                        double useEn = forceEn ? g.En : ts.en;
+                        List<TavaGeo.Center> part = TavaGeo.Build(lines, ts.mod, useEn, unit, out p, out sng, out ign);
+                        if (forceEn || eksen || !autoEn) foreach (TavaGeo.Center c in part) c.En = useEn;
+                        cl.AddRange(part);
+                        pairs += p; singles += sng; ignored += ign;
+                    }
 
                     // existing trays (duplicate check). Item4 = placed in this Eksen run (only exact overlaps count).
                     double axisTol = Math.Max(unit, 1e-4);
@@ -567,6 +615,175 @@ namespace CadAiDesigner
                 foreach (DynamicBlockReferenceProperty p in br.DynamicBlockReferencePropertyCollection)
                     if (Match(p.PropertyName, names) && p.Value != null) return Convert.ToString(p.Value, CultureInfo.InvariantCulture);
             return null;
+        }
+
+        class RenkGrup
+        {
+            public string Ad;
+            public double En;
+            public List<ObjectId> Ids = new List<ObjectId>();
+        }
+
+        class RenkSecim
+        {
+            public List<ObjectId> Ids = new List<ObjectId>();
+            public List<RenkGrup> Gruplar;
+            public string Ozet = "";
+        }
+
+        class RenkBilgi
+        {
+            public bool ByLayer, ByBlock, TrueColor;
+            public short Aci;
+            public int Rgb;
+            public string Key
+            {
+                get
+                {
+                    if (ByLayer) return "BL:" + Aci.ToString(CultureInfo.InvariantCulture);
+                    if (ByBlock) return "BB";
+                    if (TrueColor) return "RGB:" + Rgb.ToString(CultureInfo.InvariantCulture);
+                    return "ACI:" + Aci.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+        }
+
+        static RenkBilgi RenkOku(Entity e, Transaction tx)
+        {
+            RenkBilgi b = new RenkBilgi();
+            Color c = e.Color;
+            LayerTableRecord lr = (LayerTableRecord)tx.GetObject(e.LayerId, OpenMode.ForRead);
+            short layerAci = 7;
+            try { layerAci = lr.Color.ColorIndex; } catch (System.Exception) { }
+            if (c == null || c.IsByLayer) { b.ByLayer = true; b.Aci = layerAci; return b; }
+            if (c.IsByBlock) { b.ByBlock = true; b.Aci = 0; return b; }
+            if (c.ColorMethod == ColorMethod.ByColor)
+            {
+                b.TrueColor = true;
+                try { b.Rgb = c.ColorValue.ToArgb(); } catch (System.Exception) { b.Rgb = 0; }
+                try { b.Aci = c.ColorIndex; } catch (System.Exception) { b.Aci = 0; }
+                return b;
+            }
+            try { b.Aci = c.ColorIndex; } catch (System.Exception) { b.Aci = 7; }
+            return b;
+        }
+
+        static short? DxfRenk(RenkBilgi b)
+        {
+            if (b.TrueColor) return null;
+            if (b.ByLayer) return 256;
+            if (b.ByBlock) return 0;
+            return b.Aci;
+        }
+
+        static SelectionFilter HatFiltre(string layer, short? dxf62)
+        {
+            List<TypedValue> f = new List<TypedValue>();
+            f.Add(new TypedValue((int)DxfCode.Start, "LINE,LWPOLYLINE,POLYLINE"));
+            f.Add(new TypedValue((int)DxfCode.LayerName, layer));
+            if (dxf62.HasValue) f.Add(new TypedValue(62, dxf62.Value));
+            return new SelectionFilter(f.ToArray());
+        }
+
+        static ObjectId[] Secilen(Editor ed, SelectionFilter filter, bool window, out bool cancel)
+        {
+            cancel = false;
+            PromptSelectionResult pr = window
+                ? ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nAynı renk çizgi/polyline seçin: " }, filter)
+                : ed.SelectAll(filter);
+            if (pr != null && pr.Status == PromptStatus.Cancel) { cancel = true; return new ObjectId[0]; }
+            if (pr == null || pr.Status != PromptStatus.OK || pr.Value == null) return new ObjectId[0];
+            return pr.Value.GetObjectIds();
+        }
+
+        static RenkSecim RenkSec(Editor ed, Database db, TavaSettings ts)
+        {
+            PromptEntityOptions eo = new PromptEntityOptions("\nÖrnek çizgi veya polyline seçin: ");
+            eo.SetRejectMessage("\nÇizgi veya polyline seçin.");
+            eo.AddAllowedClass(typeof(Line), false);
+            eo.AddAllowedClass(typeof(Polyline), false);
+            eo.AddAllowedClass(typeof(Polyline2d), false);
+            eo.AddAllowedClass(typeof(Polyline3d), false);
+            PromptEntityResult er = ed.GetEntity(eo);
+            if (er.Status == PromptStatus.Cancel || er.Status != PromptStatus.OK) return er.Status == PromptStatus.Cancel ? null : new RenkSecim();
+
+            string layer = "";
+            RenkBilgi want = new RenkBilgi();
+            using (Transaction tx = db.TransactionManager.StartTransaction())
+            {
+                Entity ent = tx.GetObject(er.ObjectId, OpenMode.ForRead) as Entity;
+                if (ent == null) return new RenkSecim();
+                layer = ent.Layer;
+                want = RenkOku(ent, tx);
+                tx.Commit();
+            }
+            string renkAd = want.ByLayer ? "ByLayer (katman rengi " + want.Aci + ")" : (want.TrueColor ? "RGB" : "renk " + want.Aci);
+            PromptKeywordOptions ko = new PromptKeywordOptions("\n" + layer + " / " + renkAd + " [Pencere/Tumu] <Enter = tüm alan, aynı renk>: ", "Pencere Tumu") { AllowNone = true };
+            PromptResult kr = ed.GetKeywords(ko);
+            if (kr.Status == PromptStatus.Cancel) return null;
+            string sub = kr.Status == PromptStatus.OK ? kr.StringResult : "Alan";
+            bool tumu = sub == "Tumu";
+            SelectionFilter filter = HatFiltre(layer, tumu ? (short?)null : DxfRenk(want));
+            bool cancel = false;
+            ObjectId[] raw = Secilen(ed, filter, sub == "Pencere", out cancel);
+            if (cancel) return null;
+            if (sub == "Pencere" && raw.Length == 0) return new RenkSecim();
+
+            RenkSecim sec = new RenkSecim();
+            Dictionary<string, RenkGrup> groups = new Dictionary<string, RenkGrup>();
+            using (Transaction tx = db.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId id in raw)
+                {
+                    Entity ent = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                    if (ent == null) continue;
+                    if (!(ent is Line || ent is Polyline || ent is Polyline2d || ent is Polyline3d)) continue;
+                    if (!string.Equals(ent.Layer, layer, StringComparison.OrdinalIgnoreCase)) continue;
+                    RenkBilgi b = RenkOku(ent, tx);
+                    if (!tumu && b.Key != want.Key) continue;
+                    sec.Ids.Add(id);
+                    if (!tumu) continue;
+                    RenkGrup g;
+                    if (!groups.TryGetValue(b.Key, out g))
+                    {
+                        bool mapped = false;
+                        short look = b.Aci;
+                        double en = ts.EnForRenk(look, out mapped);
+                        string ad = b.ByLayer ? "ByLayer/" + b.Aci : (b.TrueColor ? "RGB" : b.Aci.ToString(CultureInfo.InvariantCulture));
+                        if (!mapped) ad += " (tabloda yok)";
+                        g = new RenkGrup { Ad = ad, En = en, Ids = new List<ObjectId>() };
+                        groups[b.Key] = g;
+                    }
+                    g.Ids.Add(id);
+                }
+                tx.Commit();
+            }
+            if (tumu) sec.Gruplar = new List<RenkGrup>(groups.Values);
+            string how = tumu ? "katmandaki tüm renkler" : (sub == "Pencere" ? "pencere, aynı renk" : "tüm alan, aynı renk");
+            sec.Ozet = "Renk: " + sec.Ids.Count + " nesne, katman " + layer + ", " + how + (sec.Gruplar != null ? " (" + string.Join(", ", sec.Gruplar.Select(g => g.Ad + "=" + F(g.En))) + ")" : "") + ".";
+            return sec;
+        }
+
+        static void RenkTablosuDuzenle(Editor ed, TavaSettings ts)
+        {
+            if (ts.renkler == null) ts.renkler = new List<RenkOlcu>();
+            while (true)
+            {
+                string cur = ts.renkler.Count == 0 ? "boş" : string.Join(", ", ts.renkler.Where(x => x != null).OrderBy(x => x.renk).Select(x => x.renk.ToString(CultureInfo.InvariantCulture) + "=" + F(x.en)));
+                PromptIntegerOptions io = new PromptIntegerOptions("\nRenk tablosu (" + cur + "). ACI no 1-255, Enter = bitir: ") { AllowNone = true, AllowNegative = false, AllowZero = false };
+                PromptIntegerResult ir = ed.GetInteger(io);
+                if (ir.Status == PromptStatus.Cancel || ir.Status == PromptStatus.None || ir.Status != PromptStatus.OK) return;
+                int no = ir.Value;
+                if (no < 1 || no > 255) { ed.WriteMessage("\n1-255 arası ACI renk.\n"); continue; }
+                bool mapped = false;
+                double curEn = ts.EnForRenk(no, out mapped);
+                PromptDoubleOptions dopt = new PromptDoubleOptions("\nRenk " + no + " EN (0 = sil): ") { AllowNone = true, AllowNegative = false, AllowZero = true, DefaultValue = curEn > 0 ? curEn : 300, UseDefaultValue = true };
+                PromptDoubleResult dr = ed.GetDouble(dopt);
+                if (dr.Status == PromptStatus.Cancel) return;
+                if (dr.Status != PromptStatus.OK) continue;
+                ts.renkler.RemoveAll(x => x != null && x.renk == no);
+                if (dr.Value > 0) ts.renkler.Add(new RenkOlcu { renk = no, en = dr.Value });
+            }
         }
 
         static void TrayInfo(BlockReference br, FitConfig cfg, ref TavaSettings ts)
