@@ -319,7 +319,11 @@ namespace CadAiDesigner
                     Vector3d a = br.Item3;
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
-                    string type = Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant();
+                    TrayRun mainRun = runs[m1.Item1];
+                    double tHere, sHere; Point3d ignored;
+                    bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out ignored)
+                        && OffsetOpposite(runs, mainRun, rb, tHere, tol);
+                    string type = offsetMate ? "YARIM_T" : (Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant());
                     pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = wm, Layer = layer };
                     AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
@@ -344,6 +348,18 @@ namespace CadAiDesigner
                     List<int> others = Enumerable.Range(1, 3).Where(k => k != opp).ToList();
                     if (opp < 0 || arms[others[0]].Item3.DotProduct(arms[others[1]].Item3) > -0.95 || Math.Abs(u.DotProduct(arms[others[0]].Item3)) > 0.1)
                     { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
+                    double offA = AxisOffset(runs[arms[0].Item1], runs[arms[opp].Item1]);
+                    double offB = AxisOffset(runs[arms[others[0]].Item1], runs[arms[others[1]].Item1]);
+                    bool colA = offA <= tol, colB = offB <= tol;
+                    if (colA != colB)
+                    {
+                        int m0 = colA ? 0 : others[0], m1i = colA ? opp : others[1];
+                        int b0 = colA ? others[0] : 0, b1 = colA ? others[1] : opp;
+                        PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
+                        PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
+                        continue;
+                    }
+                    if (!colA || !colB) { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double wu1 = runs[arms[0].Item1].W, wu2 = runs[arms[opp].Item1].W, wv1 = runs[arms[others[0]].Item1].W, wv2 = runs[arms[others[1]].Item1].W;
                     double w1 = Math.Max(wu1, wu2), w2 = Math.Max(wv1, wv2);
                     if (Math.Abs(wu1 - wu2) > 0.5 || Math.Abs(wv1 - wv2) > 0.5)
@@ -392,6 +408,80 @@ namespace CadAiDesigner
         static double Reach(FitConfig cfg, string type)
         {
             return Leg(cfg, type);
+        }
+
+        /// <summary>Perpendicular distance between two centre lines.</summary>
+        static double AxisOffset(TrayRun a, TrayRun b)
+        {
+            return Math.Abs(Cross(a.U, b.A - a.A));
+        }
+
+        static int Side(TrayRun main, TrayRun br)
+        {
+            Point3d e0 = br.A, e1 = br.A + br.U * br.L;
+            double d0 = Math.Abs(Cross(main.U, e0 - main.A)), d1 = Math.Abs(Cross(main.U, e1 - main.A));
+            double s = Cross(main.U, (d0 >= d1 ? e0 : e1) - main.A);
+            return s >= 0 ? 1 : -1;
+        }
+
+        static bool TryHit(TrayRun main, TrayRun br, double tol, out double t, out double s, out Point3d at)
+        {
+            t = 0; s = 0; at = Point3d.Origin;
+            double cr = Cross(main.U, br.U);
+            if (Math.Abs(cr) < 0.05) return false;
+            Vector3d w = br.A - main.A;
+            t = Cross(w, br.U) / cr;
+            s = Cross(w, main.U) / cr;
+            double lim = Math.Max(main.W, br.W) * 0.5 + tol;
+            if (s < -lim || s > br.L + lim) return false;
+            at = main.A + main.U * t;
+            return true;
+        }
+
+        /// <summary>Another branch on the opposite side of <paramref name="main"/>, close along it, but not on this branch's axis.</summary>
+        static bool OffsetOpposite(List<TrayRun> runs, TrayRun main, TrayRun branch, double tHere, double tol)
+        {
+            double near = Math.Max(main.W, branch.W) * 1.25 + tol;
+            int side = Side(main, branch);
+            foreach (TrayRun o in runs)
+            {
+                if (o == branch || o == main) continue;
+                double t, s; Point3d at;
+                if (!TryHit(main, o, tol, out t, out s, out at)) continue;
+                if (Math.Abs(t - tHere) > near) continue;
+                if (AxisOffset(branch, o) <= tol) continue;
+                if (Side(main, o) != -side) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>One YT-Yarım on <paramref name="branch"/>'s own axis. The main stays continuous; a broken main is closed up to this junction.</summary>
+        static void PlaceHalf(Plan plan, FitConfig cfg, List<Point3d> existing, double tol, List<TrayRun> runs,
+            Tuple<int, int, Vector3d> branch, Tuple<int, int, Vector3d> mainA, Tuple<int, int, Vector3d> mainB, string layer)
+        {
+            TrayRun br = runs[branch.Item1], m1 = runs[mainA.Item1], m2 = runs[mainB.Item1];
+            double t, s; Point3d C;
+            if (!TryHit(m1, br, tol, out t, out s, out C)) return;
+            double wm = Math.Max(m1.W, m2.W), wb = br.W;
+            Vector3d a = branch.Item3;
+            double rot = Math.Atan2(a.Y, a.X) + Math.PI / 2;
+            Vector3d lx = Rot(1, 0, rot);
+            Point3d P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2);
+            if (existing.Any(e => e.DistanceTo(P) <= 2 * tol + 1)) { plan.Existing++; return; }
+            plan.Places.Add(new Placement { Type = "YARIM_T", P = P, Rot = rot, W1 = wb, W2 = wm, Layer = layer });
+            AddCut(br, branch.Item2, a, C, Reach(cfg, "YARIM_T") + wm / 2);
+            MeetMain(m1, mainA.Item2, mainA.Item3, C, tol);
+            if (mainB.Item1 != mainA.Item1 || mainB.Item2 != mainA.Item2) MeetMain(m2, mainB.Item2, mainB.Item3, C, tol);
+        }
+
+        static void MeetMain(TrayRun r, int kind, Vector3d arm, Point3d c, double tol)
+        {
+            if (kind == 2) return;
+            double tc = (c - r.A).DotProduct(r.U);
+            double end = kind == 0 ? 0 : r.L;
+            if (Math.Abs(tc - end) > r.W * 0.5 + tol) return;
+            AddCut(r, kind, arm, c, 0);
         }
 
         /// <summary>Overlapping trays on the same run produce two arms in one direction. Keep one per direction.</summary>
