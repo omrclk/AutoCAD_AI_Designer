@@ -24,7 +24,7 @@ namespace CadAiDesigner
         public string mod { get; set; } = "Otomatik";
         public string layers { get; set; } = "*";
         public string layer { get; set; } = "E_CT";
-        /// <summary>ACI color → tray width (mm in drawing units). ByLayer uses the layer's ACI.</summary>
+        /// <summary>ACI color → tray width. ByLayer is matched by the layer's visible ACI, same as an explicit color.</summary>
         public List<RenkOlcu> renkler { get; set; } = new List<RenkOlcu>();
 
         public double EnForRenk(int aci, out bool mapped)
@@ -636,11 +636,11 @@ namespace CadAiDesigner
             public bool ByLayer, ByBlock, TrueColor;
             public short Aci;
             public int Rgb;
+            /// <summary>Visible color. ByLayer is the layer ACI, so it matches an explicit ACI of that number.</summary>
             public string Key
             {
                 get
                 {
-                    if (ByLayer) return "BL:" + Aci.ToString(CultureInfo.InvariantCulture);
                     if (ByBlock) return "BB";
                     if (TrueColor) return "RGB:" + Rgb.ToString(CultureInfo.InvariantCulture);
                     return "ACI:" + Aci.ToString(CultureInfo.InvariantCulture);
@@ -668,28 +668,16 @@ namespace CadAiDesigner
             return b;
         }
 
-        static short? DxfRenk(RenkBilgi b)
+        static SelectionFilter HatFiltre()
         {
-            if (b.TrueColor) return null;
-            if (b.ByLayer) return 256;
-            if (b.ByBlock) return 0;
-            return b.Aci;
-        }
-
-        static SelectionFilter HatFiltre(string layer, short? dxf62)
-        {
-            List<TypedValue> f = new List<TypedValue>();
-            f.Add(new TypedValue((int)DxfCode.Start, "LINE,LWPOLYLINE,POLYLINE"));
-            f.Add(new TypedValue((int)DxfCode.LayerName, layer));
-            if (dxf62.HasValue) f.Add(new TypedValue(62, dxf62.Value));
-            return new SelectionFilter(f.ToArray());
+            return new SelectionFilter(new TypedValue[] { new TypedValue((int)DxfCode.Start, "LINE,LWPOLYLINE,POLYLINE") });
         }
 
         static ObjectId[] Secilen(Editor ed, SelectionFilter filter, bool window, out bool cancel)
         {
             cancel = false;
             PromptSelectionResult pr = window
-                ? ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nAynı renk çizgi/polyline seçin: " }, filter)
+                ? ed.GetSelection(new PromptSelectionOptions { MessageForAdding = "\nÇizgi/polyline seçin (tüm katmanlar, görünen renk): " }, filter)
                 : ed.SelectAll(filter);
             if (pr != null && pr.Status == PromptStatus.Cancel) { cancel = true; return new ObjectId[0]; }
             if (pr == null || pr.Status != PromptStatus.OK || pr.Value == null) return new ObjectId[0];
@@ -707,27 +695,32 @@ namespace CadAiDesigner
             PromptEntityResult er = ed.GetEntity(eo);
             if (er.Status == PromptStatus.Cancel || er.Status != PromptStatus.OK) return er.Status == PromptStatus.Cancel ? null : new RenkSecim();
 
-            string layer = "";
             RenkBilgi want = new RenkBilgi();
             using (Transaction tx = db.TransactionManager.StartTransaction())
             {
                 Entity ent = tx.GetObject(er.ObjectId, OpenMode.ForRead) as Entity;
                 if (ent == null) return new RenkSecim();
-                layer = ent.Layer;
                 want = RenkOku(ent, tx);
                 tx.Commit();
             }
-            string renkAd = want.ByLayer ? "ByLayer (katman rengi " + want.Aci + ")" : (want.TrueColor ? "RGB" : "renk " + want.Aci);
-            PromptKeywordOptions ko = new PromptKeywordOptions("\n" + layer + " / " + renkAd + " [Pencere/Tumu] <Enter = tüm alan, aynı renk>: ", "Pencere Tumu") { AllowNone = true };
+            string renkAd = want.ByLayer ? "görünen renk " + want.Aci + " (ByLayer)" : (want.TrueColor ? "RGB" : "renk " + want.Aci);
+            PromptKeywordOptions ko = new PromptKeywordOptions("\n" + renkAd + ", tüm katmanlar [Pencere/Tumu] <Enter = tüm alan, bu renk>: ", "Pencere Tumu") { AllowNone = true };
             PromptResult kr = ed.GetKeywords(ko);
             if (kr.Status == PromptStatus.Cancel) return null;
             string sub = kr.Status == PromptStatus.OK ? kr.StringResult : "Alan";
             bool tumu = sub == "Tumu";
-            SelectionFilter filter = HatFiltre(layer, tumu ? (short?)null : DxfRenk(want));
+            bool window = sub == "Pencere";
+            if (tumu)
+            {
+                PromptKeywordOptions ko2 = new PromptKeywordOptions("\nTüm renkler, tüm katmanlar [Pencere] <Enter = tüm alan>: ", "Pencere") { AllowNone = true };
+                PromptResult kr2 = ed.GetKeywords(ko2);
+                if (kr2.Status == PromptStatus.Cancel) return null;
+                window = kr2.Status == PromptStatus.OK && kr2.StringResult == "Pencere";
+            }
             bool cancel = false;
-            ObjectId[] raw = Secilen(ed, filter, sub == "Pencere", out cancel);
+            ObjectId[] raw = Secilen(ed, HatFiltre(), window, out cancel);
             if (cancel) return null;
-            if (sub == "Pencere" && raw.Length == 0) return new RenkSecim();
+            if (window && raw.Length == 0) return new RenkSecim();
 
             RenkSecim sec = new RenkSecim();
             Dictionary<string, RenkGrup> groups = new Dictionary<string, RenkGrup>();
@@ -738,7 +731,6 @@ namespace CadAiDesigner
                     Entity ent = tx.GetObject(id, OpenMode.ForRead) as Entity;
                     if (ent == null) continue;
                     if (!(ent is Line || ent is Polyline || ent is Polyline2d || ent is Polyline3d)) continue;
-                    if (!string.Equals(ent.Layer, layer, StringComparison.OrdinalIgnoreCase)) continue;
                     RenkBilgi b = RenkOku(ent, tx);
                     if (!tumu && b.Key != want.Key) continue;
                     sec.Ids.Add(id);
@@ -749,7 +741,7 @@ namespace CadAiDesigner
                         bool mapped = false;
                         short look = b.Aci;
                         double en = ts.EnForRenk(look, out mapped);
-                        string ad = b.ByLayer ? "ByLayer/" + b.Aci : (b.TrueColor ? "RGB" : b.Aci.ToString(CultureInfo.InvariantCulture));
+                        string ad = b.TrueColor ? "RGB" : (b.ByBlock ? "ByBlock" : b.Aci.ToString(CultureInfo.InvariantCulture));
                         if (!mapped) ad += " (tabloda yok)";
                         g = new RenkGrup { Ad = ad, En = en, Ids = new List<ObjectId>() };
                         groups[b.Key] = g;
@@ -759,8 +751,8 @@ namespace CadAiDesigner
                 tx.Commit();
             }
             if (tumu) sec.Gruplar = new List<RenkGrup>(groups.Values);
-            string how = tumu ? "katmandaki tüm renkler" : (sub == "Pencere" ? "pencere, aynı renk" : "tüm alan, aynı renk");
-            sec.Ozet = "Renk: " + sec.Ids.Count + " nesne, katman " + layer + ", " + how + (sec.Gruplar != null ? " (" + string.Join(", ", sec.Gruplar.Select(g => g.Ad + "=" + F(g.En))) + ")" : "") + ".";
+            string how = tumu ? "tüm katmanlar, her görünen renk" : (window ? "pencere, tüm katmanlar, bu renk" : "tüm alan, tüm katmanlar, bu renk");
+            sec.Ozet = "Renk: " + sec.Ids.Count + " nesne, " + how + (sec.Gruplar != null ? " (" + string.Join(", ", sec.Gruplar.Select(g => g.Ad + "=" + F(g.En))) + ")" : "") + ".";
             return sec;
         }
 
