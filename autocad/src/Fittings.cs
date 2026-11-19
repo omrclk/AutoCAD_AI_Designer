@@ -142,7 +142,7 @@ namespace CadAiDesigner
                 return Runs + " düz tava incelendi. Yerleştirilecek: " + (Places.Count == 0 ? "yok" : string.Join(", ", g)) +
                        (Existing > 0 ? "; zaten mevcut (atlandı): " + Existing : "") +
                        (trimmed > 0 ? "; kısaltılacak/bölünecek tava: " + trimmed : "") +
-                       (Notes.Count > 0 ? "\n  Not: " + string.Join("\n  Not: ", Notes.Distinct().Take(15)) : "");
+                       (Notes.Count > 0 ? "\n  Not: " + string.Join("\n  Not: ", Notes.Distinct().Take(40)) : "");
             }
         }
 
@@ -242,10 +242,12 @@ namespace CadAiDesigner
             if (runs.Count == 0) { plan.Notes.Add("'" + cfg.straight_block + "' düz tava bloğu bulunamadı."); return plan; }
 
             double tol = cfg.tolerance;
+            // Only a few units count as the same junction. A larger radius merges two offset tees into one cross.
+            const double SameAxis = 5;
             List<Node> nodes = new List<Node>();
             Action<Point3d, int, int, int, int> hit = (p, i, ki, j, kj) =>
             {
-                Node n = nodes.FirstOrDefault(x => x.P.DistanceTo(p) <= 2 * tol + 1);
+                Node n = nodes.FirstOrDefault(x => x.P.DistanceTo(p) <= SameAxis);
                 if (n == null) nodes.Add(n = new Node { P = p });
                 n.Kinds[i] = ki; n.Kinds[j] = kj;
             };
@@ -299,6 +301,7 @@ namespace CadAiDesigner
                     TrayRun ra = runs[arms[0].Item1], rb = runs[arms[1].Item1];
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     short flip = (short)(Rot(-1, 0, r).DotProduct(b) > 0 ? 1 : 0);
+                    plan.Notes.Add("Düğüm " + Pt(C) + ": YD");
                     pl = new Placement { Type = "YD", P = C - b * (ra.W / 2) + a * (cfg.clearance + rb.W / 2), Rot = r, Flip = flip, W1 = ra.W, W2 = rb.W, Layer = layer };
                     AddCut(ra, arms[0].Item2, a, C, Reach(cfg, "YD") + rb.W / 2);
                     AddCut(rb, arms[1].Item2, b, C, Reach(cfg, "YD") + ra.W / 2);
@@ -320,10 +323,11 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     TrayRun mainRun = runs[m1.Item1];
-                    double tHere, sHere; Point3d ignored;
-                    bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out ignored)
-                        && OffsetOpposite(runs, mainRun, rb, tHere, tol);
+                    double tHere, sHere, mateOff; Point3d hitAt;
+                    bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out hitAt)
+                        && OffsetOpposite(runs, mainRun, rb, tHere, SameAxis, out mateOff);
                     string type = offsetMate ? "YARIM_T" : (Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant());
+                    plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff) + " > " + W(SameAxis) : ", tek taraf"));
                     pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = wm, Layer = layer };
                     AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
@@ -350,11 +354,13 @@ namespace CadAiDesigner
                     { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double offA = AxisOffset(runs[arms[0].Item1], runs[arms[opp].Item1]);
                     double offB = AxisOffset(runs[arms[others[0]].Item1], runs[arms[others[1]].Item1]);
-                    bool colA = offA <= tol, colB = offB <= tol;
+                    bool colA = offA <= SameAxis, colB = offB <= SameAxis;
                     if (colA != colB)
                     {
                         int m0 = colA ? 0 : others[0], m1i = colA ? opp : others[1];
                         int b0 = colA ? others[0] : 0, b1 = colA ? others[1] : opp;
+                        double shift = colA ? offB : offA;
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": 2×YT-Yarım, kayma " + W(shift) + " > " + W(SameAxis));
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
@@ -368,6 +374,7 @@ namespace CadAiDesigner
                         plan.Notes.Add("Haç " + Pt(C) + ": farklı genişlikler; AD1=" + W(w1) + " bir hatta, AD2=" + W(w2) + " kesen hatta atandı.");
                     double r = Math.Atan2(u.Y, u.X) - Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
+                    plan.Notes.Add("Düğüm " + Pt(C) + ": AD, eksen kayması " + W(Math.Max(offA, offB)));
                     pl = new Placement { Type = "AD", P = C - lx * (w1 / 2) - u * (cfg.clearance + w2 / 2), Rot = r, W1 = w1, W2 = w2, Layer = layer };
                     AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + w2 / 2);
                     AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + w2 / 2);
@@ -438,19 +445,22 @@ namespace CadAiDesigner
             return true;
         }
 
-        /// <summary>Another branch on the opposite side of <paramref name="main"/>, close along it, but not on this branch's axis.</summary>
-        static bool OffsetOpposite(List<TrayRun> runs, TrayRun main, TrayRun branch, double tHere, double tol)
+        /// <summary>Another branch on the opposite side of <paramref name="main"/>, within about one tray width, but not on this branch's axis.</summary>
+        static bool OffsetOpposite(List<TrayRun> runs, TrayRun main, TrayRun branch, double tHere, double sameAxis, out double offset)
         {
-            double near = Math.Max(main.W, branch.W) * 1.25 + tol;
+            offset = 0;
+            double near = Math.Max(main.W, branch.W) * 1.5 + 20;
             int side = Side(main, branch);
             foreach (TrayRun o in runs)
             {
                 if (o == branch || o == main) continue;
                 double t, s; Point3d at;
-                if (!TryHit(main, o, tol, out t, out s, out at)) continue;
+                if (!TryHit(main, o, 20, out t, out s, out at)) continue;
                 if (Math.Abs(t - tHere) > near) continue;
-                if (AxisOffset(branch, o) <= tol) continue;
+                double off = AxisOffset(branch, o);
+                if (off <= sameAxis) continue;
                 if (Side(main, o) != -side) continue;
+                if (off > offset) offset = off;
                 return true;
             }
             return false;
