@@ -323,7 +323,7 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     TrayRun mainRun = runs[m1.Item1];
-                    double tHere, sHere, mateOff; Point3d hitAt;
+                    double tHere, sHere, mateOff = 0; Point3d hitAt;
                     bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out hitAt)
                         && OffsetOpposite(runs, mainRun, rb, tHere, SameAxis, out mateOff);
                     string type = offsetMate ? "YARIM_T" : (Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant());
