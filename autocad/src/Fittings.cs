@@ -367,11 +367,24 @@ namespace CadAiDesigner
                     }
                     if (!colA || !colB) { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double wu1 = runs[arms[0].Item1].W, wu2 = runs[arms[opp].Item1].W, wv1 = runs[arms[others[0]].Item1].W, wv2 = runs[arms[others[1]].Item1].W;
+                    double wMin = Math.Min(Math.Min(wu1, wu2), Math.Min(wv1, wv2));
+                    double wMax = Math.Max(Math.Max(wu1, wu2), Math.Max(wv1, wv2));
+                    // Stock AD is four equal legs. A mixed cross (300 main, two opposite 100s) is two half tees; the wider pair is not cut.
+                    if (wMax - wMin > 1.0)
+                    {
+                        double minA = Math.Min(wu1, wu2), maxA = Math.Max(wu1, wu2);
+                        double minB = Math.Min(wv1, wv2), maxB = Math.Max(wv1, wv2);
+                        bool mainIsA = minA > minB || (Math.Abs(minA - minB) <= 1.0 && maxA >= maxB);
+                        int m0 = mainIsA ? 0 : others[0];
+                        int m1i = mainIsA ? opp : others[1];
+                        int b0 = mainIsA ? others[0] : 0;
+                        int b1 = mainIsA ? others[1] : opp;
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T x2, kollar " + Kollar(arms, runs) + ", AD yok (genislikler farkli)");
+                        PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
+                        PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
+                        continue;
+                    }
                     double w1 = Math.Max(wu1, wu2), w2 = Math.Max(wv1, wv2);
-                    if (Math.Abs(wu1 - wu2) > 0.5 || Math.Abs(wv1 - wv2) > 0.5)
-                        plan.Notes.Add("Haç " + Pt(C) + ": aynı hattın iki tarafı farklı genişlikte; her hat için büyük genişlik kullanıldı (AD1=" + W(w1) + ", AD2=" + W(w2) + ").");
-                    else if (Math.Abs(w1 - w2) > 0.5)
-                        plan.Notes.Add("Haç " + Pt(C) + ": farklı genişlikler; AD1=" + W(w1) + " bir hatta, AD2=" + W(w2) + " kesen hatta atandı.");
                     double r = Math.Atan2(u.Y, u.X) - Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     plan.Notes.Add("Düğüm " + Pt(C) + ": AD, eksen kayması " + W(Math.Max(offA, offB)));
@@ -464,6 +477,26 @@ namespace CadAiDesigner
                 return true;
             }
             return false;
+        }
+
+        /// <summary>Widths around the junction, widest arm first, so a 300 main with opposite 100s reads 300/100/300/100.</summary>
+        static string Kollar(List<Tuple<int, int, Vector3d>> arms, List<TrayRun> runs)
+        {
+            int[] idx = new int[] { 0, 1, 2, 3 };
+            Array.Sort(idx, delegate (int i, int j)
+            {
+                return Math.Atan2(arms[i].Item3.Y, arms[i].Item3.X).CompareTo(Math.Atan2(arms[j].Item3.Y, arms[j].Item3.X));
+            });
+            int start = 0;
+            double best = double.NegativeInfinity;
+            for (int i = 0; i < 4; i++)
+            {
+                double w = runs[arms[idx[i]].Item1].W;
+                if (w > best) { best = w; start = i; }
+            }
+            string[] parts = new string[4];
+            for (int i = 0; i < 4; i++) parts[i] = W(runs[arms[idx[(start + i) % 4]].Item1].W);
+            return string.Join("/", parts);
         }
 
         /// <summary>One YT-Yarım on <paramref name="branch"/>'s own axis. The main stays continuous; a broken main is closed up to this junction.</summary>
