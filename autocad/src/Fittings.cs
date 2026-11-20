@@ -338,10 +338,10 @@ namespace CadAiDesigner
                 else if (arms.Count == 3)
                 {
                     int bi = -1;
-                    for (int k = 0; k < 3 && bi < 0; k++)
+                    for (int q = 0; q < 3 && bi < 0; q++)
                     {
-                        Vector3d x = arms[(k + 1) % 3].Item3, y = arms[(k + 2) % 3].Item3;
-                        if (x.DotProduct(y) < -0.95) bi = k;
+                        Vector3d x = arms[(q + 1) % 3].Item3, y = arms[(q + 2) % 3].Item3;
+                        if (x.DotProduct(y) < -0.95) bi = q;
                     }
                     if (bi < 0 || Math.Abs(arms[bi].Item3.DotProduct(arms[(bi + 1) % 3].Item3)) > 0.1) { plan.Notes.Add("Açılı/düzensiz birleşim " + Pt(C) + ": otomatik parça yok."); continue; }
                     Tuple<int, int, Vector3d> br = arms[bi], m1 = arms[(bi + 1) % 3], m2 = arms[(bi + 2) % 3];
@@ -382,8 +382,8 @@ namespace CadAiDesigner
                     // haç: two opposite pairs, perpendicular. AD1 = width of the tray along local Y (u), AD2 = the crossing one.
                     Vector3d u = arms[0].Item3;
                     int opp = -1;
-                    for (int k = 1; k < 4; k++) if (u.DotProduct(arms[k].Item3) < -0.95) opp = k;
-                    List<int> others = Enumerable.Range(1, 3).Where(k => k != opp).ToList();
+                    for (int q = 1; q < 4; q++) if (u.DotProduct(arms[q].Item3) < -0.95) opp = q;
+                    List<int> others = Enumerable.Range(1, 3).Where(q => q != opp).ToList();
                     if (opp < 0 || arms[others[0]].Item3.DotProduct(arms[others[1]].Item3) > -0.95 || Math.Abs(u.DotProduct(arms[others[0]].Item3)) > 0.1)
                     { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double offA = AxisOffset(runs[arms[0].Item1], runs[arms[opp].Item1]);
@@ -425,7 +425,7 @@ namespace CadAiDesigner
                     pl = new Placement { Type = "AD", P = C - lx * (wAd / 2) - u * (cfg.clearance + wAd / 2), Rot = r, W1 = wAd, W2 = wAd, Layer = layer };
                     AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + wAd / 2);
                     AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + wAd / 2);
-                    foreach (int k in others) AddCut(runs[arms[k].Item1], arms[k].Item2, arms[k].Item3, C, Reach(cfg, "AD") + wAd / 2);
+                    foreach (int q in others) AddCut(runs[arms[q].Item1], arms[q].Item2, arms[q].Item3, C, Reach(cfg, "AD") + wAd / 2);
                 }
                 else { plan.Notes.Add("Tanınmayan birleşim " + Pt(C) + " (" + arms.Count + " kol)."); continue; }
 
@@ -446,7 +446,7 @@ namespace CadAiDesigner
                     if (Math.Abs(Cross(a.U, b.U)) > 0.05 || Math.Abs(Cross(a.U, b.A - a.A)) > Math.Max(a.W, b.W) / 2) continue;
                     double b0 = (b.A - a.A).DotProduct(a.U), b1 = b0 + b.U.DotProduct(a.U) * b.L;
                     double lo = Math.Max(0, Math.Min(b0, b1)), hi = Math.Min(a.L, Math.Max(b0, b1));
-                    if (hi - lo > cfg.tolerance) plan.Notes.Add("Üst üste binen tava " + a.Br.Handle + " / " + b.Br.Handle + " (" + W(hi - lo / k) + " mm): biri fazla olabilir.");
+                    if (hi - lo > cfg.tolerance) plan.Notes.Add("Üst üste binen tava " + a.Br.Handle + " / " + b.Br.Handle + " (" + W((hi - lo) / k) + " mm): biri fazla olabilir.");
                 }
             return plan;
         }
