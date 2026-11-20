@@ -334,6 +334,7 @@ namespace CadAiDesigner
                 // 2) options loop. renkGrup != null means Renk/Tumu: one EN per color.
                 bool autoEn = true;
                 bool standart = false;
+                bool renk = false;
                 int standartAtlanan = 0;
                 List<RenkGrup> renkGrup = null;
                 while (true)
@@ -427,6 +428,7 @@ namespace CadAiDesigner
                                 ids = sec.Ids;
                                 renkGrup = sec.Gruplar;
                                 standart = true;
+                                renk = false;
                                 standartAtlanan = atlanan;
                                 ed.WriteMessage("\n" + sec.Ozet + "\n");
                                 break;
@@ -434,6 +436,7 @@ namespace CadAiDesigner
                         case "Renk":
                             {
                                 standart = false;
+                                renk = true;
                                 RenkSecim sec = RenkSec(ed, db, ts);
                                 if (sec == null) return;
                                 if (sec.Ids.Count == 0) { ed.WriteMessage("\nBu renk/katmanda çizgi bulunamadı.\n"); break; }
@@ -526,7 +529,9 @@ namespace CadAiDesigner
                         if (c.S.GetDistanceTo(c.E) < 1) continue;
                         if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, (eksen && h.Item4) ? axisTol : Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
                         Vector2d u = (c.E - c.S).GetNormal(); Vector2d n = new Vector2d(-u.Y, u.X);
-                        Point2d p = c.S - n * (c.En / 2);
+                        bool axis = eksen || renk;
+                        // Double-line mode keeps the edge-based insertion. An axis line is the centre; SeatOnAxis corrects the block's real base point.
+                        Point2d p = axis ? c.S : c.S - n * (c.En / 2);
                         BlockReference br = new BlockReference(new Point3d(p.X, p.Y, 0), btrId);
                         br.SetDatabaseDefaults(db);
                         br.Rotation = Math.Atan2(u.Y, u.X);
@@ -539,6 +544,7 @@ namespace CadAiDesigner
                         SetAttr(tx, br, cfg.height_props, ts.yukseklik);
                         SetAttr(tx, br, cfg.thickness_props, ts.kalinlik);
                         BlockAlong.RefreshHatches(tx, br);
+                        if (axis) SeatOnAxis(br, c.S, c.E);
                         have.Add(Tuple.Create(c.S, c.E, c.En, eksen));
                         created.Add(br.ObjectId);
                         if (c.Renk != null && renkAdet.ContainsKey(c.Renk)) renkAdet[c.Renk] = renkAdet[c.Renk] + 1;
@@ -626,6 +632,23 @@ namespace CadAiDesigner
             LayerTableRecord r = new LayerTableRecord { Name = name };
             lt.Add(r); tx.AddNewlyCreatedDBObject(r, true);
             return name;
+        }
+
+        /// <summary>Shift the block perpendicular to S–E so its geometric centre lies on that axis. Direction of S–E does not matter.</summary>
+        static void SeatOnAxis(BlockReference br, Point2d s, Point2d e)
+        {
+            Vector2d d = e - s;
+            double len = d.Length;
+            if (len < 1e-6) return;
+            Vector2d n = new Vector2d(-d.Y / len, d.X / len);
+            Extents3d ex;
+            try { ex = br.GeometricExtents; }
+            catch (System.Exception) { return; }
+            double midX = (ex.MinPoint.X + ex.MaxPoint.X) * 0.5, midY = (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5;
+            double wantX = (s.X + e.X) * 0.5, wantY = (s.Y + e.Y) * 0.5;
+            double lat = (midX - wantX) * n.X + (midY - wantY) * n.Y;
+            if (Math.Abs(lat) < 1e-6) return;
+            br.Position = new Point3d(br.Position.X - n.X * lat, br.Position.Y - n.Y * lat, br.Position.Z);
         }
 
         static void SetNum(BlockReference br, string name, double v, List<string> notes)

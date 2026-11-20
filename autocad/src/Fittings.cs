@@ -112,6 +112,8 @@ namespace CadAiDesigner
         {
             public BlockReference Br;
             public Point3d A; public Vector3d U, Perp; public double L, W;
+            /// <summary>Perpendicular offset from the block insertion point to the geometric centre line.</summary>
+            public double BaseLat;
             public List<double[]> Cuts = new List<double[]>();
             /// <summary>New start/end along U (may be &lt;0 or &gt;L = extension) when a tray END sits at a fitting.</summary>
             public double? NewStart, NewEnd;
@@ -206,7 +208,19 @@ namespace CadAiDesigner
             Vector3d u = new Vector3d(Math.Cos(br.Rotation), Math.Sin(br.Rotation), 0) * sx;
             Vector3d pp = new Vector3d(-Math.Sin(br.Rotation), Math.Cos(br.Rotation), 0) * sy;
             TrayRun r = new TrayRun { Br = br, U = u, Perp = pp, L = L * ax, W = Wd * Math.Abs(br.ScaleFactors.Y) };
-            r.A = br.Position + pp * (r.W / 2);
+            // Width parameter is not always centred on the base point. Measure the real centre, and keep the
+            // historic EN/2 model when the block actually is centred that way (double-line placement).
+            double lat = r.W / 2;
+            try
+            {
+                Extents3d ex = br.GeometricExtents;
+                Point3d c = new Point3d((ex.MinPoint.X + ex.MaxPoint.X) * 0.5, (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5, br.Position.Z);
+                double measured = (c - br.Position).DotProduct(pp);
+                if (Math.Abs(measured - lat) > Math.Max(0.5, r.W * 0.02)) lat = measured;
+            }
+            catch (System.Exception) { }
+            r.BaseLat = lat;
+            r.A = br.Position + pp * lat;
             return r;
         }
 
@@ -624,7 +638,7 @@ namespace CadAiDesigner
                     // already re-sized reference keep a stale hatch and break later grip stretching)
                     double len = (pieces[k][1] - pieces[k][0]) / Math.Abs(src.ScaleFactors.X);
                     BlockReference t = BlockAlong.Recreate(tx, ms, src, cfg.length_param, len, notes, k == pieces.Count - 1);
-                    t.Position = r.A + r.U * pieces[k][0] - r.Perp * (r.W / 2);
+                    t.Position = r.A + r.U * pieces[k][0] - r.Perp * r.BaseLat;
                     if (k > 0) res.Copied++;
                 }
                 res.Modified++;
