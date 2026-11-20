@@ -26,6 +26,8 @@ namespace CadAiDesigner
         public string layer { get; set; } = "E_CT";
         /// <summary>ACI color → tray width. ByLayer is matched by the layer's visible ACI, same as an explicit color.</summary>
         public List<RenkOlcu> renkler { get; set; } = new List<RenkOlcu>();
+        /// <summary>Fixed record of the Standart map (1=100 … 6=600). The command always uses that map, not edits here.</summary>
+        public List<RenkOlcu> standartRenkler { get; set; }
 
         public double EnForRenk(int aci, out bool mapped)
         {
@@ -59,7 +61,7 @@ namespace CadAiDesigner
         public const double MinGap = 30, MaxGap = 700;
 
         public class Line2 { public Point2d S, E; public double W; public Line2(Point2d s, Point2d e, double w = 0) { S = s; E = e; W = w; } public double Len { get { return S.GetDistanceTo(E); } } }
-        public class Center { public Point2d S, E; public double En; public bool Pair; }
+        public class Center { public Point2d S, E; public double En; public bool Pair; public string Renk; }
 
         /// <summary>Nearest standard width when within 15 %, otherwise the measured value rounded to 1.</summary>
         public static double Snap(double d) { return Snap(d, 1); }
@@ -291,6 +293,7 @@ namespace CadAiDesigner
                 FitConfig cfg = FitConfig.Load();
                 TavaSettings ts = TavaSettings.Load();
                 if (ts.renkler == null) ts.renkler = new List<RenkOlcu>();
+                if (ts.standartRenkler == null || ts.standartRenkler.Count == 0) ts.standartRenkler = StandartVarsayilan();
 
                 // 1) selection: pickfirst, picked lines/polylines, or Tumu (all on plan layers)
                 List<ObjectId> ids = null;
@@ -330,15 +333,17 @@ namespace CadAiDesigner
 
                 // 2) options loop. renkGrup != null means Renk/Tumu: one EN per color.
                 bool autoEn = true;
+                bool standart = false;
+                int standartAtlanan = 0;
                 List<RenkGrup> renkGrup = null;
                 while (true)
                 {
                     bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
                     string msg = "\nEN=" + (eksen ? F(ts.en) + " (eksen, çift çizgi yok)" : (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en))) +
                                  ", Y=" + ts.yukseklik + ", t=" + ts.kalinlik + ", Mod=" + ts.mod + ", Bağlantı=" + (ts.baglanti ? "Evet" : "Hayir") +
-                                 (renkGrup != null ? ", Renk=tablo (" + renkGrup.Count + " renk)" : "") +
-                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Renk/RenkTablosu/Baglanti/Devam] <Devam>: ";
-                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Renk RenkTablosu Baglanti Devam") { AllowNone = true };
+                                 (standart ? ", Standart=1..6 eksen" : (renkGrup != null ? ", Renk=tablo (" + renkGrup.Count + " renk)" : "")) +
+                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Renk/RenkTablosu/Standart/Baglanti/Devam] <Devam>: ";
+                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Renk RenkTablosu Standart Baglanti Devam") { AllowNone = true };
                     PromptResult kr = ed.GetKeywords(ko);
                     if (kr.Status == PromptStatus.Cancel) return;
                     if (kr.Status == PromptStatus.None || kr.StringResult == "Devam") break;
@@ -401,8 +406,22 @@ namespace CadAiDesigner
                                 ts.mod = "Eksen";
                                 break;
                             }
+                        case "Standart":
+                            {
+                                int atlanan = 0;
+                                RenkSecim sec = StandartSec(ed, db, out atlanan);
+                                if (sec == null) return;
+                                if (sec.Ids.Count == 0) { ed.WriteMessage("\nStandart renk (1-6) bulunamadı. Atlanan: " + atlanan + ".\n"); break; }
+                                ids = sec.Ids;
+                                renkGrup = sec.Gruplar;
+                                standart = true;
+                                standartAtlanan = atlanan;
+                                ed.WriteMessage("\n" + sec.Ozet + "\n");
+                                break;
+                            }
                         case "Renk":
                             {
+                                standart = false;
                                 RenkSecim sec = RenkSec(ed, db, ts);
                                 if (sec == null) return;
                                 if (sec.Ids.Count == 0) { ed.WriteMessage("\nBu renk/katmanda çizgi bulunamadı.\n"); break; }
@@ -441,7 +460,8 @@ namespace CadAiDesigner
                     HashSet<ObjectId> before = new HashSet<ObjectId>(ms.Cast<ObjectId>());
 
                     double unit = TavaGeo.UnitsPerMm(db.Insunits);
-                    bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
+                    bool eksen = standart || string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
+                    string buildMod = standart ? "Eksen" : ts.mod;
                     if (eksen && ts.en <= 0) ts.en = 300;
                     List<TavaGeo.Center> cl = new List<TavaGeo.Center>();
                     List<RenkGrup> passes = renkGrup != null ? renkGrup : new List<RenkGrup> { new RenkGrup { En = ts.en, Ids = ids } };
@@ -459,8 +479,12 @@ namespace CadAiDesigner
                         }
                         int p = 0, sng = 0, ign = 0;
                         double useEn = forceEn ? g.En : ts.en;
-                        List<TavaGeo.Center> part = TavaGeo.Build(lines, ts.mod, useEn, unit, out p, out sng, out ign);
-                        if (forceEn || eksen || !autoEn) foreach (TavaGeo.Center c in part) c.En = useEn;
+                        List<TavaGeo.Center> part = TavaGeo.Build(lines, buildMod, useEn, unit, out p, out sng, out ign);
+                        foreach (TavaGeo.Center c in part)
+                        {
+                            if (forceEn || eksen || !autoEn) c.En = useEn;
+                            if (standart) c.Renk = g.Ad;
+                        }
                         cl.AddRange(part);
                         pairs += p; singles += sng; ignored += ign;
                     }
@@ -481,6 +505,10 @@ namespace CadAiDesigner
                     if (kesif) have.Clear();   // plan keşif: count the whole plan, ignore trays already drawn
                     string layer = EnsureLayer(tx, db, ts.layer);
                     List<ObjectId> created = new List<ObjectId>();
+                    Dictionary<string, int> renkAdet = new Dictionary<string, int>();
+                    if (standart && renkGrup != null)
+                        foreach (RenkGrup g in renkGrup)
+                            if (g != null && g.Ad != null && !renkAdet.ContainsKey(g.Ad)) renkAdet[g.Ad] = 0;
                     foreach (TavaGeo.Center c in cl)
                     {
                         if (c.S.GetDistanceTo(c.E) < 1) continue;
@@ -501,6 +529,7 @@ namespace CadAiDesigner
                         BlockAlong.RefreshHatches(tx, br);
                         have.Add(Tuple.Create(c.S, c.E, c.En, eksen));
                         created.Add(br.ObjectId);
+                        if (c.Renk != null && renkAdet.ContainsKey(c.Renk)) renkAdet[c.Renk] = renkAdet[c.Renk] + 1;
                         res.Created++;
                     }
 
@@ -525,6 +554,18 @@ namespace CadAiDesigner
                             fit = " Ek parçalar: " + plan.Summary() + " " + Fittings.Apply(tx, db, plan, cfg, new ApplyResult()) + ".";
                         }
                     }
+                    string renkSatir = "";
+                    if (standart && renkGrup != null)
+                    {
+                        List<string> bits = new List<string>();
+                        foreach (RenkGrup g in renkGrup)
+                        {
+                            int n = 0;
+                            if (g != null && g.Ad != null) renkAdet.TryGetValue(g.Ad, out n);
+                            bits.Add((g == null ? "?" : g.Ad) + " EN " + F(g == null ? 0 : g.En) + ": " + n + " tava");
+                        }
+                        renkSatir = " Standart: " + string.Join("; ", bits) + ". Atlanan (1-6 dışı): " + standartAtlanan + ".";
+                    }
                     if (kesif)
                     {
                         // simulate AIDTAVA + AIDBAGLANTI, measure the result, then roll everything back (drawing untouched)
@@ -533,7 +574,7 @@ namespace CadAiDesigner
                         List<Dictionary<string, object>> items = Takeoff.Compute(db, rq, kn, tx);
                         tx.Abort();
                         kn.RemoveAll(x => x.Contains("Model alan"));
-                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + fit);
+                        kn.Add("Plandan keşif: " + created.Count + " tava hattı (çift çizgi " + pairs + ", tek çizgi " + singles + (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") + "); çizime hiçbir şey eklenmedi." + renkSatir + fit);
                         string ks = Metraj.Send(doc, items, kn, "plankesif");
                         ed.WriteMessage("\nPlandan keşif: " + ks + "\n");
                         Metraj.Raise("Plandan keşif: " + ks);
@@ -544,7 +585,7 @@ namespace CadAiDesigner
                                  (pairs > 0 ? ", çift çizgi: " + pairs : "") + (singles > 0 ? ", tek çizgi: " + singles : "") +
                                  (dups > 0 ? ", mevcut tavayla çakışan " + dups + " atlandı" : "") +
                                  (ignored > 0 ? ", eşleşmeyen " + ignored + " çizgi yok sayıldı" : "") +
-                                 (arcs > 0 ? ", " + arcs + " yay kiriş olarak alındı" : "") + "." + fit +
+                                 (arcs > 0 ? ", " + arcs + " yay kiriş olarak alındı" : "") + "." + renkSatir + fit +
                                  (res.Notes.Count > 0 ? " (" + string.Join(" ", res.Notes.Distinct()) + ")" : "") + " Geri almak için UNDO (tek adım).";
                     ed.WriteMessage("\n" + sum + "\n");
                     Metraj.Raise("Tava: " + sum);
@@ -776,6 +817,88 @@ namespace CadAiDesigner
                 ts.renkler.RemoveAll(x => x != null && x.renk == no);
                 if (dr.Value > 0) ts.renkler.Add(new RenkOlcu { renk = no, en = dr.Value });
             }
+        }
+
+        static List<RenkOlcu> StandartVarsayilan()
+        {
+            return new List<RenkOlcu>
+            {
+                new RenkOlcu { renk = 1, en = 100 }, new RenkOlcu { renk = 2, en = 200 }, new RenkOlcu { renk = 3, en = 300 },
+                new RenkOlcu { renk = 4, en = 400 }, new RenkOlcu { renk = 5, en = 500 }, new RenkOlcu { renk = 6, en = 600 }
+            };
+        }
+
+        static bool StandartEnBul(short aci, out double en)
+        {
+            switch (aci)
+            {
+                case 1: en = 100; return true;
+                case 2: en = 200; return true;
+                case 3: en = 300; return true;
+                case 4: en = 400; return true;
+                case 5: en = 500; return true;
+                case 6: en = 600; return true;
+                default: en = 0; return false;
+            }
+        }
+
+        static string StandartAd(short aci)
+        {
+            switch (aci)
+            {
+                case 1: return "1 kırmızı";
+                case 2: return "2 sarı";
+                case 3: return "3 yeşil";
+                case 4: return "4 cyan";
+                case 5: return "5 mavi";
+                case 6: return "6 magenta";
+                default: return aci.ToString(CultureInfo.InvariantCulture);
+            }
+        }
+
+        /// <summary>All layers, effective color, fixed 1=100 … 6=600, axis mode. Other colors are counted and skipped.</summary>
+        static RenkSecim StandartSec(Editor ed, Database db, out int atlanan)
+        {
+            atlanan = 0;
+            PromptKeywordOptions ko = new PromptKeywordOptions("\nStandart (1=100, 2=200, 3=300, 4=400, 5=500, 6=600, eksen, tüm katmanlar) [Pencere] <Enter = tüm alan>: ", "Pencere") { AllowNone = true };
+            PromptResult kr = ed.GetKeywords(ko);
+            if (kr.Status == PromptStatus.Cancel) return null;
+            bool window = kr.Status == PromptStatus.OK && kr.StringResult == "Pencere";
+            bool cancel = false;
+            ObjectId[] raw = Secilen(ed, HatFiltre(), window, out cancel);
+            if (cancel) return null;
+
+            RenkSecim sec = new RenkSecim();
+            Dictionary<short, RenkGrup> groups = new Dictionary<short, RenkGrup>();
+            using (Transaction tx = db.TransactionManager.StartTransaction())
+            {
+                foreach (ObjectId id in raw)
+                {
+                    Entity ent = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                    if (ent == null) continue;
+                    if (!(ent is Line || ent is Polyline || ent is Polyline2d || ent is Polyline3d)) continue;
+                    RenkBilgi b = RenkOku(ent, tx);
+                    double en = 0;
+                    if (b.ByBlock || b.TrueColor || !StandartEnBul(b.Aci, out en)) { atlanan++; continue; }
+                    RenkGrup g;
+                    if (!groups.TryGetValue(b.Aci, out g))
+                    {
+                        g = new RenkGrup { Ad = StandartAd(b.Aci), En = en, Ids = new List<ObjectId>() };
+                        groups[b.Aci] = g;
+                    }
+                    g.Ids.Add(id);
+                    sec.Ids.Add(id);
+                }
+                tx.Commit();
+            }
+            sec.Gruplar = new List<RenkGrup>();
+            for (short a = 1; a <= 6; a++)
+            {
+                RenkGrup g;
+                if (groups.TryGetValue(a, out g)) sec.Gruplar.Add(g);
+            }
+            sec.Ozet = "Standart: " + sec.Ids.Count + " çizgi/polyline, atlanan " + atlanan + " (ACI 1-6 dışı). Eksen: 1=100, 2=200, 3=300, 4=400, 5=500, 6=600.";
+            return sec;
         }
 
         static void TrayInfo(BlockReference br, FitConfig cfg, ref TavaSettings ts)
