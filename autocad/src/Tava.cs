@@ -63,7 +63,7 @@ namespace CadAiDesigner
         public const double MinGap = 30, MaxGap = 700;
 
         public class Line2 { public Point2d S, E; public double W; public Line2(Point2d s, Point2d e, double w = 0) { S = s; E = e; W = w; } public double Len { get { return S.GetDistanceTo(E); } } }
-        public class Center { public Point2d S, E; public double En; public bool Pair; public string Renk; }
+        public class Center { public Point2d S, E; public double En; public double EnMm; public bool Pair; public string Renk; }
 
         /// <summary>Nearest standard width when within 15 %, otherwise the measured value rounded to 1.</summary>
         public static double Snap(double d) { return Snap(d, 1); }
@@ -293,13 +293,7 @@ namespace CadAiDesigner
             return "Oto";
         }
 
-        public static double FactorOf(string canon)
-        {
-            if (canon == "Cm") return 10;
-            if (canon == "Metre") return 1000;
-            if (canon == "Dm") return 100;
-            return 1;
-        }
+        public static double FactorOf(string canon) { return BirimOlcu.MmPerUnit(canon); }
 
         public static Sonuc Peek(Database db)
         {
@@ -723,6 +717,7 @@ namespace CadAiDesigner
                         foreach (TavaGeo.Center c in part)
                         {
                             if (forceEn || eksen || !autoEn) c.En = useEn;
+                            c.EnMm = k > 1e-12 ? c.En / k : c.En;
                             if (standart) c.Renk = g.Ad;
                         }
                         cl.AddRange(part);
@@ -760,18 +755,18 @@ namespace CadAiDesigner
                         BlockReference br = new BlockReference(new Point3d(p.X, p.Y, 0), btrId);
                         br.SetDatabaseDefaults(db);
                         br.Rotation = Math.Atan2(u.Y, u.X);
-                        br.ScaleFactors = new Scale3d(k, k, k);
                         br.Layer = layer;
                         ms.AppendEntity(br); tx.AddNewlyCreatedDBObject(br, true);
                         Executor.AddAttributes(tx, br);
                         List<string> notes = new List<string>();
-                        double toMm = 1.0 / k;
-                        SetNum(br, cfg.length_param, c.S.GetDistanceTo(c.E) * toMm, res.Notes);
-                        SetNum(br, cfg.width_param, c.En * toMm, res.Notes);
+                        double boyMm = BirimOlcu.BoyMm(c.S.GetDistanceTo(c.E), 1.0 / k);
+                        // Parameters stay in millimetres. Scale is applied after, then the mm values are written again
+                        // so a host that multiplies distances by ScaleFactors cannot shrink them a second time.
+                        SetBlockMm(br, cfg.length_param, boyMm, cfg.width_param, c.EnMm, k, res.Notes);
                         SetAttr(tx, br, cfg.height_props, ts.yukseklik);
                         SetAttr(tx, br, cfg.thickness_props, ts.kalinlik);
                         BlockAlong.RefreshHatches(tx, br);
-                        if (axis) SeatOnAxis(br, c.S, c.E);
+                        if (axis) SeatOnAxis(tx, br, c.S, c.E, c.En, k);
                         have.Add(Tuple.Create(c.S, c.E, c.En, eksen));
                         created.Add(br.ObjectId);
                         if (c.Renk != null && renkAdet.ContainsKey(c.Renk)) renkAdet[c.Renk] = renkAdet[c.Renk] + 1;
@@ -786,7 +781,7 @@ namespace CadAiDesigner
                         {
                             // only the new trays and existing trays touching them (never re-fit the rest of the drawing)
                             List<ObjectId> scope = new List<ObjectId>(created);
-                            List<Extents3d> boxes = created.Select(id => Grow(((Entity)tx.GetObject(id, OpenMode.ForRead)).GeometricExtents, cfg.clearance + cfg.tolerance)).ToList();
+                            List<Extents3d> boxes = created.Select(id => Grow(((Entity)tx.GetObject(id, OpenMode.ForRead)).GeometricExtents, (cfg.clearance + cfg.tolerance) * k)).ToList();
                             foreach (ObjectId id in ms)
                             {
                                 if (kesif || created.Contains(id)) continue;
@@ -862,19 +857,48 @@ namespace CadAiDesigner
             return name;
         }
 
-        /// <summary>Shift the block perpendicular to S–E so its geometric centre lies on that axis. Direction of S–E does not matter.</summary>
-        static void SeatOnAxis(BlockReference br, Point2d s, Point2d e)
+        /// <summary>Write millimetre distance parameters, then scale the reference by <paramref name="unitsPerMm"/>.
+        /// The mm values are written again after the scale so they are not multiplied by it.</summary>
+        static void SetBlockMm(BlockReference br, string lengthName, double boyMm, string widthName, double enMm, double unitsPerMm, List<string> notes)
+        {
+            double sc = unitsPerMm > 1e-12 ? unitsPerMm : 1;
+            br.ScaleFactors = new Scale3d(1, 1, 1);
+            SetNum(br, lengthName, boyMm, notes);
+            SetNum(br, widthName, enMm, notes);
+            if (Math.Abs(sc - 1) < 1e-12) return;
+            br.ScaleFactors = new Scale3d(sc, sc, sc);
+            SetNum(br, lengthName, boyMm, notes);
+            SetNum(br, widthName, enMm, notes);
+        }
+
+        /// <summary>Shift the block perpendicular to S–E so its geometric centre lies on that axis. The shift is in drawing units and is never larger than the tray width.</summary>
+        static void SeatOnAxis(Transaction tx, BlockReference br, Point2d s, Point2d e, double widthDu, double unitsPerMm)
         {
             Vector2d d = e - s;
             double len = d.Length;
             if (len < 1e-6) return;
             Vector2d n = new Vector2d(-d.Y / len, d.X / len);
-            Extents3d ex;
-            try { ex = br.GeometricExtents; }
-            catch (System.Exception) { return; }
-            double midX = (ex.MinPoint.X + ex.MaxPoint.X) * 0.5, midY = (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5;
-            double wantX = (s.X + e.X) * 0.5, wantY = (s.Y + e.Y) * 0.5;
-            double lat = (midX - wantX) * n.X + (midY - wantY) * n.Y;
+            double limit = Math.Max(widthDu * 2, 1e-4);
+            double lat = 0;
+            bool unitScale = Math.Abs(unitsPerMm - 1) < 1e-9;
+            if (unitScale)
+            {
+                Extents3d ex;
+                try { ex = br.GeometricExtents; }
+                catch (System.Exception) { return; }
+                double midX = (ex.MinPoint.X + ex.MaxPoint.X) * 0.5, midY = (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5;
+                double wantX = (s.X + e.X) * 0.5, wantY = (s.Y + e.Y) * 0.5;
+                lat = (midX - wantX) * n.X + (midY - wantY) * n.Y;
+            }
+            else
+            {
+                double localCy = 0;
+                bool ok = Fittings.TryLocalCenterY(tx, br, out localCy);
+                // Block units are millimetres; the reference scale turns that into drawing units.
+                lat = ok ? localCy * br.ScaleFactors.Y : widthDu * 0.5;
+                if (!ok || Math.Abs(lat) > limit) lat = widthDu * 0.5;
+            }
+            if (!unitScale && Math.Abs(lat) > limit) lat = widthDu * 0.5;
             if (Math.Abs(lat) < 1e-6) return;
             br.Position = new Point3d(br.Position.X - n.X * lat, br.Position.Y - n.Y * lat, br.Position.Z);
         }

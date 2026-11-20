@@ -112,6 +112,8 @@ namespace CadAiDesigner
         {
             public BlockReference Br;
             public Point3d A; public Vector3d U, Perp; public double L, W;
+            /// <summary>Width parameter in millimetres (not multiplied by the reference scale).</summary>
+            public double Wmm;
             /// <summary>Perpendicular offset from the block insertion point to the geometric centre line.</summary>
             public double BaseLat;
             public List<double[]> Cuts = new List<double[]>();
@@ -210,21 +212,64 @@ namespace CadAiDesigner
             double ax = Math.Abs(br.ScaleFactors.X);
             Vector3d u = new Vector3d(Math.Cos(br.Rotation), Math.Sin(br.Rotation), 0) * sx;
             Vector3d pp = new Vector3d(-Math.Sin(br.Rotation), Math.Cos(br.Rotation), 0) * sy;
-            TrayRun r = new TrayRun { Br = br, U = u, Perp = pp, L = L * ax, W = Wd * Math.Abs(br.ScaleFactors.Y) };
-            // Width parameter is not always centred on the base point. Measure the real centre, and keep the
-            // historic EN/2 model when the block actually is centred that way (double-line placement).
+            TrayRun r = new TrayRun { Br = br, U = u, Perp = pp, L = L * ax, W = Wd * Math.Abs(br.ScaleFactors.Y), Wmm = Wd };
+            // Width parameter is not always centred on the base point. At unit scale, measure the world centre.
+            // A scaled reference keeps the parameter in millimetres, so the centre offset is local-Y times the scale
+            // (world extents of a scaled dynamic block are not reliable and must not move the centreline).
             double lat = r.W / 2;
-            try
+            bool unitScale = Math.Abs(Math.Abs(br.ScaleFactors.X) - 1) < 1e-6 && Math.Abs(Math.Abs(br.ScaleFactors.Y) - 1) < 1e-6;
+            if (unitScale)
             {
-                Extents3d ex = br.GeometricExtents;
-                Point3d c = new Point3d((ex.MinPoint.X + ex.MaxPoint.X) * 0.5, (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5, br.Position.Z);
-                double measured = (c - br.Position).DotProduct(pp);
-                if (Math.Abs(measured - lat) > Math.Max(0.5, r.W * 0.02)) lat = measured;
+                try
+                {
+                    Extents3d ex = br.GeometricExtents;
+                    Point3d c = new Point3d((ex.MinPoint.X + ex.MaxPoint.X) * 0.5, (ex.MinPoint.Y + ex.MaxPoint.Y) * 0.5, br.Position.Z);
+                    double measured = (c - br.Position).DotProduct(pp);
+                    if (Math.Abs(measured - lat) > Math.Max(0.5, r.W * 0.02) && Math.Abs(measured) <= Math.Max(r.W * 3, 1)) lat = measured;
+                }
+                catch (System.Exception) { }
             }
-            catch (System.Exception) { }
+            else
+            {
+                double localCy = 0;
+                Transaction top = br.Database != null ? br.Database.TransactionManager.TopTransaction : null;
+                if (top != null && TryLocalCenterY(top, br, out localCy))
+                {
+                    double world = localCy * br.ScaleFactors.Y;
+                    if (Math.Abs(world) <= Math.Max(r.W * 3, 1e-4)) lat = world;
+                }
+            }
             r.BaseLat = lat;
             r.A = br.Position + pp * lat;
             return r;
+        }
+
+        /// <summary>Y of the evaluated block's centre in block units (millimetres for these blocks), relative to the base point.</summary>
+        internal static bool TryLocalCenterY(Transaction tx, BlockReference br, out double cy)
+        {
+            cy = 0;
+            if (tx == null || br == null) return false;
+            BlockTableRecord btr = tx.GetObject(br.BlockTableRecord, OpenMode.ForRead) as BlockTableRecord;
+            if (btr == null) return false;
+            bool any = false;
+            double minY = 0, maxY = 0;
+            foreach (ObjectId id in btr)
+            {
+                Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                if (e == null || e is AttributeDefinition) continue;
+                Extents3d x;
+                try { x = e.GeometricExtents; }
+                catch (System.Exception) { continue; }
+                if (!any) { minY = x.MinPoint.Y; maxY = x.MaxPoint.Y; any = true; }
+                else
+                {
+                    if (x.MinPoint.Y < minY) minY = x.MinPoint.Y;
+                    if (x.MaxPoint.Y > maxY) maxY = x.MaxPoint.Y;
+                }
+            }
+            if (!any) return false;
+            cy = (minY + maxY) * 0.5;
+            return true;
         }
 
         static double Cross(Vector3d a, Vector3d b) { return a.X * b.Y - a.Y * b.X; }
@@ -263,7 +308,6 @@ namespace CadAiDesigner
             if (runs.Count == 0) { plan.Notes.Add("'" + cfg.straight_block + "' düz tava bloğu bulunamadı."); return plan; }
 
             double tol = cfg.tolerance;
-            double eq = k;
             // Only a few millimetres count as the same junction. A larger radius merges two offset tees into one cross.
             double sameAxis = 5 * k;
             List<Node> nodes = new List<Node>();
@@ -287,8 +331,8 @@ namespace CadAiDesigner
                         if (Math.Abs(Cross(a.U, off)) > tol) continue;
                         foreach (Point3d pa in new[] { a.A, a.A + a.U * a.L })
                             foreach (Point3d pb in new[] { b.A, b.A + b.U * b.L })
-                                if (pa.DistanceTo(pb) <= tol && Math.Abs(a.W - b.W) > 0.5 * k)
-                                    plan.Notes.Add("Genişlik değişimi (redüksiyon) " + W(a.W / k) + "→" + W(b.W / k) + " " + Pt(pa) + ": otomatik parça yok.");
+                                if (pa.DistanceTo(pb) <= tol && Math.Abs(a.Wmm - b.Wmm) > 0.5)
+                                    plan.Notes.Add("Genişlik değişimi (redüksiyon) " + W(a.Wmm) + "→" + W(b.Wmm) + " " + Pt(pa) + ": otomatik parça yok.");
                         continue;
                     }
                     Vector3d w = b.A - a.A;
@@ -324,10 +368,10 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     short flip = (short)(Rot(-1, 0, r).DotProduct(b) > 0 ? 1 : 0);
                     double na = ra.W, nb = rb.W, yd = Math.Min(na, nb);
-                    bool mixedYd = Math.Abs(na - nb) > eq;
+                    bool mixedYd = Math.Abs(ra.Wmm - rb.Wmm) > 1.0;
                     // Mixed corner is a stock elbow of the narrow width (200/300 -> YD 200). Both centre lines stay on the elbow axes and stop at its faces.
                     if (mixedYd)
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YD " + W(yd / k) + " (kollar " + W(Math.Min(na, nb) / k) + "/" + W(Math.Max(na, nb) / k) + ", karisik YD yok)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YD " + W(Math.Min(ra.Wmm, rb.Wmm)) + " (kollar " + W(Math.Min(ra.Wmm, rb.Wmm)) + "/" + W(Math.Max(ra.Wmm, rb.Wmm)) + ", karisik YD yok)");
                     else
                         plan.Notes.Add("Düğüm " + Pt(C) + ": YD");
                     double legA = mixedYd ? yd : na, legB = mixedYd ? yd : nb;
@@ -347,8 +391,9 @@ namespace CadAiDesigner
                     Tuple<int, int, Vector3d> br = arms[bi], m1 = arms[(bi + 1) % 3], m2 = arms[(bi + 2) % 3];
                     TrayRun rb = runs[br.Item1];
                     double w1m = runs[m1.Item1].W, w2m = runs[m2.Item1].W;
+                    double w1mm = runs[m1.Item1].Wmm, w2mm = runs[m2.Item1].Wmm;
                     double wm = Math.Max(w1m, w2m), wb = rb.W;
-                    bool mainMixed = Math.Abs(w1m - w2m) > eq;
+                    bool mainMixed = Math.Abs(w1mm - w2mm) > 1.0;
                     Vector3d a = br.Item3;
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
@@ -357,11 +402,11 @@ namespace CadAiDesigner
                     bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out hitAt)
                         && OffsetOpposite(runs, mainRun, rb, tHere, sameAxis, tol, out mateOff);
                     // Full YT only when the branch and both main arms are the same width. Otherwise one half tee at the branch width.
-                    string type = (!offsetMate && !mainMixed && Math.Abs(wb - wm) <= eq) ? "YT" : "YARIM_T";
+                    string type = (!offsetMate && !mainMixed && Math.Abs(rb.Wmm - Math.Max(w1mm, w2mm)) <= 1.0) ? "YT" : "YARIM_T";
                     if (mainMixed)
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T " + W(wb / k) + " (ana " + W(Math.Min(w1m, w2m) / k) + "/" + W(Math.Max(w1m, w2m) / k) + ", karisik YT yok)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T " + W(rb.Wmm) + " (ana " + W(Math.Min(w1mm, w2mm)) + "/" + W(Math.Max(w1mm, w2mm)) + ", karisik YT yok)");
                     else
-                        plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff / k) + " > " + W(sameAxis / k) : ", tek taraf"));
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff / k) + " > " + W(sameAxis / k) + " mm" : ", tek taraf"));
                     pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = type == "YT" ? wb : wm, Layer = layer };
                     AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
@@ -394,34 +439,35 @@ namespace CadAiDesigner
                         int m0 = colA ? 0 : others[0], m1i = colA ? opp : others[1];
                         int b0 = colA ? others[0] : 0, b1 = colA ? others[1] : opp;
                         double shift = colA ? offB : offA;
-                        plan.Notes.Add("Düğüm " + Pt(C) + ": 2×YT-Yarım, kayma " + W(shift / k) + " > " + W(sameAxis / k));
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": 2×YT-Yarım, kayma " + W(shift / k) + " > " + W(sameAxis / k) + " mm");
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
                     }
                     if (!colA || !colB) { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double wu1 = runs[arms[0].Item1].W, wu2 = runs[arms[opp].Item1].W, wv1 = runs[arms[others[0]].Item1].W, wv2 = runs[arms[others[1]].Item1].W;
-                    double wMin = Math.Min(Math.Min(wu1, wu2), Math.Min(wv1, wv2));
-                    double wMax = Math.Max(Math.Max(wu1, wu2), Math.Max(wv1, wv2));
+                    double mu1 = runs[arms[0].Item1].Wmm, mu2 = runs[arms[opp].Item1].Wmm, mv1 = runs[arms[others[0]].Item1].Wmm, mv2 = runs[arms[others[1]].Item1].Wmm;
+                    double wMin = Math.Min(Math.Min(mu1, mu2), Math.Min(mv1, mv2));
+                    double wMax = Math.Max(Math.Max(mu1, mu2), Math.Max(mv1, mv2));
                     // Stock AD is four equal legs. Otherwise the pair that contains the widest arm stays continuous (600 main, 400 above and 100 below -> two half tees).
-                    if (wMax - wMin > eq)
+                    if (wMax - wMin > 1.0)
                     {
-                        double minA = Math.Min(wu1, wu2), maxA = Math.Max(wu1, wu2);
-                        double minB = Math.Min(wv1, wv2), maxB = Math.Max(wv1, wv2);
-                        bool mainIsA = maxA > maxB || (Math.Abs(maxA - maxB) <= eq && minA >= minB);
+                        double minA = Math.Min(mu1, mu2), maxA = Math.Max(mu1, mu2);
+                        double minB = Math.Min(mv1, mv2), maxB = Math.Max(mv1, mv2);
+                        bool mainIsA = maxA > maxB || (Math.Abs(maxA - maxB) <= 1.0 && minA >= minB);
                         int m0 = mainIsA ? 0 : others[0];
                         int m1i = mainIsA ? opp : others[1];
                         int b0 = mainIsA ? others[0] : 0;
                         int b1 = mainIsA ? others[1] : opp;
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T x2, kollar " + Kollar(arms, runs, k) + ", AD yok (genislikler farkli)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T x2, kollar " + Kollar(arms, runs) + ", AD yok (genislikler farkli)");
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
                     }
-                    double wAd = wMax;
+                    double wAd = Math.Max(Math.Max(wu1, wu2), Math.Max(wv1, wv2));
                     double r = Math.Atan2(u.Y, u.X) - Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
-                    plan.Notes.Add("Düğüm " + Pt(C) + ": AD, eksen kayması " + W(Math.Max(offA, offB)));
+                    plan.Notes.Add("Düğüm " + Pt(C) + ": AD, eksen kayması " + W(Math.Max(offA, offB) / k) + " mm");
                     pl = new Placement { Type = "AD", P = C - lx * (wAd / 2) - u * (cfg.clearance + wAd / 2), Rot = r, W1 = wAd, W2 = wAd, Layer = layer };
                     AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + wAd / 2);
                     AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + wAd / 2);
@@ -514,7 +560,7 @@ namespace CadAiDesigner
         }
 
         /// <summary>Widths around the junction, widest arm first, so a 300 main with opposite 100s reads 300/100/300/100.</summary>
-        static string Kollar(List<Tuple<int, int, Vector3d>> arms, List<TrayRun> runs, double k)
+        static string Kollar(List<Tuple<int, int, Vector3d>> arms, List<TrayRun> runs)
         {
             int[] idx = new int[] { 0, 1, 2, 3 };
             Array.Sort(idx, delegate (int i, int j)
@@ -529,8 +575,7 @@ namespace CadAiDesigner
                 if (w > best) { best = w; start = i; }
             }
             string[] parts = new string[4];
-            double ku = k > 1e-12 ? k : 1;
-            for (int i = 0; i < 4; i++) parts[i] = W(runs[arms[idx[(start + i) % 4]].Item1].W / ku);
+            for (int i = 0; i < 4; i++) parts[i] = W(runs[arms[idx[(start + i) % 4]].Item1].Wmm);
             return string.Join("/", parts);
         }
 
@@ -623,15 +668,22 @@ namespace CadAiDesigner
                 b.SetDatabaseDefaults(db);
                 double ku = plan != null && plan.K > 1e-12 ? plan.K : 1;
                 double toMm = 1.0 / ku;
-                b.ScaleFactors = new Scale3d(ku, ku, ku);
+                double w1mm = p.W1 * toMm, w2mm = p.W2 * toMm;
+                b.ScaleFactors = new Scale3d(1, 1, 1);
                 b.Rotation = p.Rot;
                 b.Layer = !string.IsNullOrEmpty(cfg.layer) && lt.Has(cfg.layer) ? cfg.layer : p.Layer;
                 ms.AppendEntity(b);
                 tx.AddNewlyCreatedDBObject(b, true);
                 Executor.AddAttributes(tx, b);
                 SetProp(b, cfg.visibility_param, ft.state, notes);
-                SetProp(b, ft.w1, p.W1 * toMm, notes);
-                if (!string.IsNullOrEmpty(ft.w2)) SetProp(b, ft.w2, p.W2 * toMm, notes);
+                SetProp(b, ft.w1, w1mm, notes);
+                if (!string.IsNullOrEmpty(ft.w2)) SetProp(b, ft.w2, w2mm, notes);
+                if (Math.Abs(ku - 1) >= 1e-12)
+                {
+                    b.ScaleFactors = new Scale3d(ku, ku, ku);
+                    SetProp(b, ft.w1, w1mm, notes);
+                    if (!string.IsNullOrEmpty(ft.w2)) SetProp(b, ft.w2, w2mm, notes);
+                }
                 if (!string.IsNullOrEmpty(ft.flip)) SetProp(b, ft.flip, p.Flip, notes);
                 BlockAlong.RefreshHatches(tx, b);
                 res.Created++;
