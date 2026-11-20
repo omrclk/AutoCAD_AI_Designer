@@ -31,22 +31,11 @@ namespace CadAiDesigner
 
         public static double UnitFactor(Database db, List<string> notes)
         {
-            switch (db.Insunits)
-            {
-                case UnitsValue.Millimeters: return 0.001;
-                case UnitsValue.Centimeters: return 0.01;
-                case UnitsValue.Decimeters: return 0.1;
-                case UnitsValue.Meters: return 1;
-                case UnitsValue.Inches: return 0.0254;
-                case UnitsValue.Feet: return 0.3048;
-                case UnitsValue.Kilometers: return 1000;
-                case UnitsValue.Undefined:
-                    notes.Add("Not: INSUNITS tanımsız; çizim birimi mm kabul edildi (UNITS komutuyla ayarlayın).");
-                    return 0.001;
-                default:
-                    notes.Add("Not: INSUNITS=" + db.Insunits + " desteklenmiyor; mm kabul edildi.");
-                    return 0.001;
-            }
+            CizimBirimi.Sonuc s = CizimBirimi.Peek(db);
+            if (s != null && s.Oto && notes != null && !string.IsNullOrEmpty(s.Not))
+                notes.Add("Birim: " + s.Ad + " (oto, " + s.Not + ").");
+            double factor = s != null && s.Factor > 0 ? s.Factor : 1;
+            return factor / 1000.0;
         }
 
         class Acc { public string Kat, Kalem, Birim, Katman; public double Miktar; public int Adet; }

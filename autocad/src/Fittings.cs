@@ -133,12 +133,15 @@ namespace CadAiDesigner
             public List<Placement> Places = new List<Placement>();
             public List<string> Notes = new List<string>();
             public int Existing, Runs;
+            /// <summary>Drawing units per millimetre. Widths on placements are in drawing units; summary shows millimetres.</summary>
+            public double K = 1;
             List<TrayRun> runs;
             internal List<TrayRun> RunList { get { return runs; } set { runs = value; } }
 
             public string Summary()
             {
-                IEnumerable<string> g = Places.GroupBy(p => p.Type + " " + W(p.W1) + (p.Type == "YD" || Math.Abs(p.W1 - p.W2) < 0.5 ? "" : "/" + W(p.W2)))
+                double ku = K > 1e-12 ? K : 1;
+                IEnumerable<string> g = Places.GroupBy(p => p.Type + " " + W(p.W1 / ku) + (p.Type == "YD" || Math.Abs(p.W1 - p.W2) < 0.5 * ku ? "" : "/" + W(p.W2 / ku)))
                     .OrderBy(x => x.Key).Select(x => x.Key + " × " + x.Count());
                 int trimmed = RunList == null ? 0 : RunList.Count(r => r.Changed);
                 return Runs + " düz tava incelendi. Yerleştirilecek: " + (Places.Count == 0 ? "yok" : string.Join(", ", g)) +
@@ -253,15 +256,20 @@ namespace CadAiDesigner
             }
             plan.Runs = runs.Count;
             plan.RunList = runs;
+            CizimBirimi.Sonuc bir = CizimBirimi.Peek(db);
+            double k = bir != null && bir.K > 0 ? bir.K : 1;
+            plan.K = k;
+            cfg = CizimBirimi.Scale(cfg, k);
             if (runs.Count == 0) { plan.Notes.Add("'" + cfg.straight_block + "' düz tava bloğu bulunamadı."); return plan; }
 
             double tol = cfg.tolerance;
-            // Only a few units count as the same junction. A larger radius merges two offset tees into one cross.
-            const double SameAxis = 5;
+            double eq = k;
+            // Only a few millimetres count as the same junction. A larger radius merges two offset tees into one cross.
+            double sameAxis = 5 * k;
             List<Node> nodes = new List<Node>();
             Action<Point3d, int, int, int, int> hit = (p, i, ki, j, kj) =>
             {
-                Node n = nodes.FirstOrDefault(x => x.P.DistanceTo(p) <= SameAxis);
+                Node n = nodes.FirstOrDefault(x => x.P.DistanceTo(p) <= sameAxis);
                 if (n == null) nodes.Add(n = new Node { P = p });
                 n.Kinds[i] = ki; n.Kinds[j] = kj;
             };
@@ -279,8 +287,8 @@ namespace CadAiDesigner
                         if (Math.Abs(Cross(a.U, off)) > tol) continue;
                         foreach (Point3d pa in new[] { a.A, a.A + a.U * a.L })
                             foreach (Point3d pb in new[] { b.A, b.A + b.U * b.L })
-                                if (pa.DistanceTo(pb) <= tol && Math.Abs(a.W - b.W) > 0.5)
-                                    plan.Notes.Add("Genişlik değişimi (redüksiyon) " + W(a.W) + "→" + W(b.W) + " " + Pt(pa) + ": otomatik parça yok.");
+                                if (pa.DistanceTo(pb) <= tol && Math.Abs(a.W - b.W) > 0.5 * k)
+                                    plan.Notes.Add("Genişlik değişimi (redüksiyon) " + W(a.W / k) + "→" + W(b.W / k) + " " + Pt(pa) + ": otomatik parça yok.");
                         continue;
                     }
                     Vector3d w = b.A - a.A;
@@ -316,10 +324,10 @@ namespace CadAiDesigner
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     short flip = (short)(Rot(-1, 0, r).DotProduct(b) > 0 ? 1 : 0);
                     double na = ra.W, nb = rb.W, yd = Math.Min(na, nb);
-                    bool mixedYd = Math.Abs(na - nb) > 1.0;
+                    bool mixedYd = Math.Abs(na - nb) > eq;
                     // Mixed corner is a stock elbow of the narrow width (200/300 -> YD 200). Both centre lines stay on the elbow axes and stop at its faces.
                     if (mixedYd)
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YD " + W(yd) + " (kollar " + W(yd) + "/" + W(Math.Max(na, nb)) + ", karisik YD yok)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YD " + W(yd / k) + " (kollar " + W(Math.Min(na, nb) / k) + "/" + W(Math.Max(na, nb) / k) + ", karisik YD yok)");
                     else
                         plan.Notes.Add("Düğüm " + Pt(C) + ": YD");
                     double legA = mixedYd ? yd : na, legB = mixedYd ? yd : nb;
@@ -340,20 +348,20 @@ namespace CadAiDesigner
                     TrayRun rb = runs[br.Item1];
                     double w1m = runs[m1.Item1].W, w2m = runs[m2.Item1].W;
                     double wm = Math.Max(w1m, w2m), wb = rb.W;
-                    bool mainMixed = Math.Abs(w1m - w2m) > 1.0;
+                    bool mainMixed = Math.Abs(w1m - w2m) > eq;
                     Vector3d a = br.Item3;
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     TrayRun mainRun = runs[m1.Item1];
                     double tHere, sHere, mateOff = 0; Point3d hitAt;
                     bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out hitAt)
-                        && OffsetOpposite(runs, mainRun, rb, tHere, SameAxis, out mateOff);
+                        && OffsetOpposite(runs, mainRun, rb, tHere, sameAxis, tol, out mateOff);
                     // Full YT only when the branch and both main arms are the same width. Otherwise one half tee at the branch width.
-                    string type = (!offsetMate && !mainMixed && Math.Abs(wb - wm) <= 1.0) ? "YT" : "YARIM_T";
+                    string type = (!offsetMate && !mainMixed && Math.Abs(wb - wm) <= eq) ? "YT" : "YARIM_T";
                     if (mainMixed)
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T " + W(wb) + " (ana " + W(Math.Min(w1m, w2m)) + "/" + W(Math.Max(w1m, w2m)) + ", karisik YT yok)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T " + W(wb / k) + " (ana " + W(Math.Min(w1m, w2m) / k) + "/" + W(Math.Max(w1m, w2m) / k) + ", karisik YT yok)");
                     else
-                        plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff) + " > " + W(SameAxis) : ", tek taraf"));
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff / k) + " > " + W(sameAxis / k) : ", tek taraf"));
                     pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = type == "YT" ? wb : wm, Layer = layer };
                     AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
@@ -380,13 +388,13 @@ namespace CadAiDesigner
                     { plan.Notes.Add("Açılı/düzensiz kesişim (haç) " + Pt(C) + ": otomatik parça yok."); continue; }
                     double offA = AxisOffset(runs[arms[0].Item1], runs[arms[opp].Item1]);
                     double offB = AxisOffset(runs[arms[others[0]].Item1], runs[arms[others[1]].Item1]);
-                    bool colA = offA <= SameAxis, colB = offB <= SameAxis;
+                    bool colA = offA <= sameAxis, colB = offB <= sameAxis;
                     if (colA != colB)
                     {
                         int m0 = colA ? 0 : others[0], m1i = colA ? opp : others[1];
                         int b0 = colA ? others[0] : 0, b1 = colA ? others[1] : opp;
                         double shift = colA ? offB : offA;
-                        plan.Notes.Add("Düğüm " + Pt(C) + ": 2×YT-Yarım, kayma " + W(shift) + " > " + W(SameAxis));
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": 2×YT-Yarım, kayma " + W(shift / k) + " > " + W(sameAxis / k));
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
@@ -396,16 +404,16 @@ namespace CadAiDesigner
                     double wMin = Math.Min(Math.Min(wu1, wu2), Math.Min(wv1, wv2));
                     double wMax = Math.Max(Math.Max(wu1, wu2), Math.Max(wv1, wv2));
                     // Stock AD is four equal legs. Otherwise the pair that contains the widest arm stays continuous (600 main, 400 above and 100 below -> two half tees).
-                    if (wMax - wMin > 1.0)
+                    if (wMax - wMin > eq)
                     {
                         double minA = Math.Min(wu1, wu2), maxA = Math.Max(wu1, wu2);
                         double minB = Math.Min(wv1, wv2), maxB = Math.Max(wv1, wv2);
-                        bool mainIsA = maxA > maxB || (Math.Abs(maxA - maxB) <= 1.0 && minA >= minB);
+                        bool mainIsA = maxA > maxB || (Math.Abs(maxA - maxB) <= eq && minA >= minB);
                         int m0 = mainIsA ? 0 : others[0];
                         int m1i = mainIsA ? opp : others[1];
                         int b0 = mainIsA ? others[0] : 0;
                         int b1 = mainIsA ? others[1] : opp;
-                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T x2, kollar " + Kollar(arms, runs) + ", AD yok (genislikler farkli)");
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T x2, kollar " + Kollar(arms, runs, k) + ", AD yok (genislikler farkli)");
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b0], arms[m0], arms[m1i], layer);
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
@@ -421,7 +429,7 @@ namespace CadAiDesigner
                 }
                 else { plan.Notes.Add("Tanınmayan birleşim " + Pt(C) + " (" + arms.Count + " kol)."); continue; }
 
-                if (existing.Any(e => e.DistanceTo(pl.P) <= 2 * tol + 1))
+                if (existing.Any(e => e.DistanceTo(pl.P) <= 2 * tol + k))
                 {
                     plan.Existing++;
                     foreach (int ri in n.Kinds.Keys) runs[ri].Reset(); // already fitted by hand: leave trays as they are
@@ -438,7 +446,7 @@ namespace CadAiDesigner
                     if (Math.Abs(Cross(a.U, b.U)) > 0.05 || Math.Abs(Cross(a.U, b.A - a.A)) > Math.Max(a.W, b.W) / 2) continue;
                     double b0 = (b.A - a.A).DotProduct(a.U), b1 = b0 + b.U.DotProduct(a.U) * b.L;
                     double lo = Math.Max(0, Math.Min(b0, b1)), hi = Math.Min(a.L, Math.Max(b0, b1));
-                    if (hi - lo > cfg.tolerance) plan.Notes.Add("Üst üste binen tava " + a.Br.Handle + " / " + b.Br.Handle + " (" + W(hi - lo) + " mm): biri fazla olabilir.");
+                    if (hi - lo > cfg.tolerance) plan.Notes.Add("Üst üste binen tava " + a.Br.Handle + " / " + b.Br.Handle + " (" + W(hi - lo / k) + " mm): biri fazla olabilir.");
                 }
             return plan;
         }
@@ -485,16 +493,16 @@ namespace CadAiDesigner
         }
 
         /// <summary>Another branch on the opposite side of <paramref name="main"/>, within about one tray width, but not on this branch's axis.</summary>
-        static bool OffsetOpposite(List<TrayRun> runs, TrayRun main, TrayRun branch, double tHere, double sameAxis, out double offset)
+        static bool OffsetOpposite(List<TrayRun> runs, TrayRun main, TrayRun branch, double tHere, double sameAxis, double tol, out double offset)
         {
             offset = 0;
-            double near = Math.Max(main.W, branch.W) * 1.5 + 20;
+            double near = Math.Max(main.W, branch.W) * 1.5 + tol;
             int side = Side(main, branch);
             foreach (TrayRun o in runs)
             {
                 if (o == branch || o == main) continue;
                 double t, s; Point3d at;
-                if (!TryHit(main, o, 20, out t, out s, out at)) continue;
+                if (!TryHit(main, o, tol, out t, out s, out at)) continue;
                 if (Math.Abs(t - tHere) > near) continue;
                 double off = AxisOffset(branch, o);
                 if (off <= sameAxis) continue;
@@ -506,7 +514,7 @@ namespace CadAiDesigner
         }
 
         /// <summary>Widths around the junction, widest arm first, so a 300 main with opposite 100s reads 300/100/300/100.</summary>
-        static string Kollar(List<Tuple<int, int, Vector3d>> arms, List<TrayRun> runs)
+        static string Kollar(List<Tuple<int, int, Vector3d>> arms, List<TrayRun> runs, double k)
         {
             int[] idx = new int[] { 0, 1, 2, 3 };
             Array.Sort(idx, delegate (int i, int j)
@@ -521,7 +529,8 @@ namespace CadAiDesigner
                 if (w > best) { best = w; start = i; }
             }
             string[] parts = new string[4];
-            for (int i = 0; i < 4; i++) parts[i] = W(runs[arms[idx[(start + i) % 4]].Item1].W);
+            double ku = k > 1e-12 ? k : 1;
+            for (int i = 0; i < 4; i++) parts[i] = W(runs[arms[idx[(start + i) % 4]].Item1].W / ku);
             return string.Join("/", parts);
         }
 
@@ -537,7 +546,7 @@ namespace CadAiDesigner
             double rot = Math.Atan2(a.Y, a.X) + Math.PI / 2;
             Vector3d lx = Rot(1, 0, rot);
             Point3d P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2);
-            if (existing.Any(e => e.DistanceTo(P) <= 2 * tol + 1)) { plan.Existing++; return; }
+            if (existing.Any(e => e.DistanceTo(P) <= 2 * tol + plan.K)) { plan.Existing++; return; }
             plan.Places.Add(new Placement { Type = "YARIM_T", P = P, Rot = rot, W1 = wb, W2 = wm, Layer = layer });
             AddCut(br, branch.Item2, a, C, Reach(cfg, "YARIM_T") + wm / 2);
             MeetMain(m1, mainA.Item2, mainA.Item3, C, tol);
@@ -612,14 +621,17 @@ namespace CadAiDesigner
                 if (cfg.types == null || !cfg.types.TryGetValue(p.Type, out ft)) { notes.Add(p.Type + " eşlemesi yok (fittings.json)."); continue; }
                 BlockReference b = new BlockReference(p.P, fit);
                 b.SetDatabaseDefaults(db);
+                double ku = plan != null && plan.K > 1e-12 ? plan.K : 1;
+                double toMm = 1.0 / ku;
+                b.ScaleFactors = new Scale3d(ku, ku, ku);
                 b.Rotation = p.Rot;
                 b.Layer = !string.IsNullOrEmpty(cfg.layer) && lt.Has(cfg.layer) ? cfg.layer : p.Layer;
                 ms.AppendEntity(b);
                 tx.AddNewlyCreatedDBObject(b, true);
                 Executor.AddAttributes(tx, b);
                 SetProp(b, cfg.visibility_param, ft.state, notes);
-                SetProp(b, ft.w1, p.W1, notes);
-                if (!string.IsNullOrEmpty(ft.w2)) SetProp(b, ft.w2, p.W2, notes);
+                SetProp(b, ft.w1, p.W1 * toMm, notes);
+                if (!string.IsNullOrEmpty(ft.w2)) SetProp(b, ft.w2, p.W2 * toMm, notes);
                 if (!string.IsNullOrEmpty(ft.flip)) SetProp(b, ft.flip, p.Flip, notes);
                 BlockAlong.RefreshHatches(tx, b);
                 res.Created++;
@@ -628,7 +640,8 @@ namespace CadAiDesigner
             foreach (TrayRun r in plan.RunList ?? new List<TrayRun>())
             {
                 if (!r.Changed) continue;
-                List<double[]> pieces = Pieces(r, Math.Max(1, cfg.tolerance / 2));
+                double ku2 = plan != null && plan.K > 1e-12 ? plan.K : 1;
+                List<double[]> pieces = Pieces(r, Math.Max(ku2, cfg.tolerance * ku2 / 2));
                 BlockReference src = (BlockReference)tx.GetObject(r.Br.ObjectId, OpenMode.ForWrite);
                 if (pieces.Count == 0) { src.Erase(); res.Erased++; continue; }
                 Point3d basePos = src.Position;
@@ -697,6 +710,9 @@ namespace CadAiDesigner
             try
             {
                 FitConfig cfg = FitConfig.Load();
+                CizimBirimi.Sonuc bir = CizimBirimi.Resolve(doc.Database, null, TavaSettings.Load().birim);
+                CizimBirimi.Active = bir;
+                ed.WriteMessage("\nBirim: " + bir.Ad + (bir.Oto ? " (oto, " + bir.Not + ")" : "") + "\n");
                 List<ObjectId> ids = null;
                 PromptSelectionResult sr = ed.SelectImplied();
                 if (sr.Status != PromptStatus.OK)
@@ -740,6 +756,7 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nEk parça hatası: " + ex.Message + "\n");
                 Metraj.Raise("Ek parça hatası: " + ex.Message);
             }
+            finally { CizimBirimi.Active = null; }
         }
     }
 }

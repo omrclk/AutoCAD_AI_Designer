@@ -22,6 +22,8 @@ namespace CadAiDesigner
         public string kalinlik { get; set; } = "2";
         public bool baglanti { get; set; } = true;
         public string mod { get; set; } = "Otomatik";
+        /// <summary>Drawing unit: Oto, Mm, Cm or Metre. Widths in this file stay in millimetres.</summary>
+        public string birim { get; set; } = "Oto";
         public string layers { get; set; } = "*";
         public string layer { get; set; } = "E_CT";
         /// <summary>ACI color → tray width. ByLayer is matched by the layer's visible ACI, same as an explicit color.</summary>
@@ -267,6 +269,205 @@ namespace CadAiDesigner
         static bool Dup(List<Center> res, Point2d s, Point2d e, double w) { return res.Any(c => Covered(s, e, c.S, c.E, w / 4)); }
     }
 
+    /// <summary>Millimetres per drawing unit. Blocks stay defined in mm and are inserted at scale 1/factor.</summary>
+    internal static class CizimBirimi
+    {
+        internal class Sonuc
+        {
+            public string Stored = "Oto", Ad = "Mm", Not = "";
+            public double Factor = 1, K = 1;
+            public bool Oto;
+            public string Prompt { get { return Oto ? Ad + " (oto)" : Ad; } }
+        }
+
+        public static Sonuc Active;
+
+        public static string Canon(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return "Oto";
+            string t = s.Trim();
+            if (string.Equals(t, "Oto", StringComparison.OrdinalIgnoreCase) || string.Equals(t, "Auto", StringComparison.OrdinalIgnoreCase)) return "Oto";
+            if (string.Equals(t, "Mm", StringComparison.OrdinalIgnoreCase)) return "Mm";
+            if (string.Equals(t, "Cm", StringComparison.OrdinalIgnoreCase)) return "Cm";
+            if (string.Equals(t, "Metre", StringComparison.OrdinalIgnoreCase) || string.Equals(t, "m", StringComparison.OrdinalIgnoreCase)) return "Metre";
+            return "Oto";
+        }
+
+        public static double FactorOf(string canon)
+        {
+            if (canon == "Cm") return 10;
+            if (canon == "Metre") return 1000;
+            if (canon == "Dm") return 100;
+            return 1;
+        }
+
+        public static Sonuc Peek(Database db)
+        {
+            if (Active != null) return Active;
+            return Resolve(db, null, null);
+        }
+
+        public static Sonuc Resolve(Database db, IEnumerable<ObjectId> sample, string stored)
+        {
+            string canon = Canon(stored ?? TavaSettings.Load().birim);
+            Sonuc s = new Sonuc { Stored = canon, Oto = canon == "Oto" };
+            if (!s.Oto)
+            {
+                s.Ad = canon;
+                s.Factor = FactorOf(canon);
+                s.K = s.Factor > 0 ? 1.0 / s.Factor : 1;
+                return s;
+            }
+            double insF = 1;
+            string insAd = FromIns(db == null ? UnitsValue.Millimeters : db.Insunits, out insF);
+            string insNm = InsName(db == null ? UnitsValue.Millimeters : db.Insunits);
+            bool sure = false;
+            string guess = db == null ? null : Guess(db, sample, out sure);
+            if (sure && guess != null && !string.Equals(guess, insAd, StringComparison.OrdinalIgnoreCase))
+            {
+                s.Ad = guess;
+                s.Factor = FactorOf(guess);
+                s.Not = "INSUNITS=" + insNm + " ama ölçü " + guess.ToLowerInvariant() + " gibi";
+            }
+            else
+            {
+                s.Ad = insAd;
+                s.Factor = insF;
+                s.Not = "INSUNITS=" + insNm;
+            }
+            s.K = s.Factor > 0 ? 1.0 / s.Factor : 1;
+            return s;
+        }
+
+        static string FromIns(UnitsValue u, out double factor)
+        {
+            switch (u)
+            {
+                case UnitsValue.Centimeters: factor = 10; return "Cm";
+                case UnitsValue.Decimeters: factor = 100; return "Dm";
+                case UnitsValue.Meters: factor = 1000; return "Metre";
+                case UnitsValue.Inches: factor = 25.4; return "In";
+                case UnitsValue.Feet: factor = 304.8; return "Ft";
+                default: factor = 1; return "Mm";
+            }
+        }
+
+        static string InsName(UnitsValue u)
+        {
+            switch (u)
+            {
+                case UnitsValue.Millimeters: return "mm";
+                case UnitsValue.Centimeters: return "cm";
+                case UnitsValue.Decimeters: return "dm";
+                case UnitsValue.Meters: return "m";
+                default: return u.ToString();
+            }
+        }
+
+        /// <summary>Gaps near 10–60 are centimetres of a standard tray; 100–600 are millimetres. Lengths: thousands = mm, hundreds = cm.</summary>
+        static string Guess(Database db, IEnumerable<ObjectId> sample, out bool sure)
+        {
+            sure = false;
+            List<double> lens = new List<double>();
+            List<TavaGeo.Line2> segs = new List<TavaGeo.Line2>();
+            try
+            {
+                using (Transaction tx = db.TransactionManager.StartTransaction())
+                {
+                    IEnumerable<ObjectId> ids = sample;
+                    if (ids == null)
+                    {
+                        BlockTable bt = (BlockTable)tx.GetObject(db.BlockTableId, OpenMode.ForRead);
+                        BlockTableRecord ms = (BlockTableRecord)tx.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                        ids = ms.Cast<ObjectId>().Take(2000).ToList();
+                    }
+                    int n = 0;
+                    foreach (ObjectId id in ids)
+                    {
+                        if (++n > 2000 || id.IsErased) continue;
+                        Entity e = tx.GetObject(id, OpenMode.ForRead) as Entity;
+                        if (!(e is Line || e is Polyline || e is Polyline2d || e is Polyline3d)) continue;
+                        foreach (BlockAlong.Seg sg in BlockAlong.Segments(tx, e))
+                        {
+                            double L = sg.S.DistanceTo(sg.E);
+                            if (L <= 1e-4) continue;
+                            lens.Add(L);
+                            if (segs.Count < 280) segs.Add(new TavaGeo.Line2(new Point2d(sg.S.X, sg.S.Y), new Point2d(sg.E.X, sg.E.Y)));
+                        }
+                    }
+                    tx.Commit();
+                }
+            }
+            catch (System.Exception) { return null; }
+
+            List<double> gaps = new List<double>();
+            for (int i = 0; i < segs.Count && gaps.Count < 24; i++)
+            {
+                TavaGeo.Line2 a = segs[i];
+                if (a.Len < 1e-6) continue;
+                Vector2d ua = (a.E - a.S) / a.Len;
+                Vector2d na = new Vector2d(-ua.Y, ua.X);
+                for (int j = i + 1; j < segs.Count && gaps.Count < 24; j++)
+                {
+                    TavaGeo.Line2 b = segs[j];
+                    if (b.Len < 1e-6) continue;
+                    Vector2d ub = (b.E - b.S) / b.Len;
+                    if (Math.Abs(ua.X * ub.Y - ua.Y * ub.X) > 0.02) continue;
+                    double d = Math.Abs((b.S - a.S).DotProduct(na));
+                    if (d < 0.5 || d > 5000) continue;
+                    double t0 = (b.S - a.S).DotProduct(ua), t1 = (b.E - a.S).DotProduct(ua);
+                    double ov = Math.Min(a.Len, Math.Max(t0, t1)) - Math.Max(0, Math.Min(t0, t1));
+                    if (ov < Math.Min(30, 0.4 * Math.Min(a.Len, b.Len))) continue;
+                    gaps.Add(d);
+                }
+            }
+            if (gaps.Count >= 3)
+            {
+                gaps.Sort();
+                double g = gaps[gaps.Count / 2];
+                if (g >= 80 && g <= 900) { sure = true; return "Mm"; }
+                if (g >= 5 && g < 80) { sure = true; return "Cm"; }
+                if (g < 2) { sure = true; return "Metre"; }
+            }
+            if (lens.Count < 4) return null;
+            lens.Sort();
+            double med = lens[lens.Count / 2], mx = lens[lens.Count - 1];
+            if (med >= 2500 || (med >= 1200 && mx >= 6000)) { sure = true; return "Mm"; }
+            if (med <= 15 && mx <= 80) { sure = true; return "Metre"; }
+            if (med >= 40 && med <= 900) { sure = true; return "Cm"; }
+            return null;
+        }
+
+        public static FitConfig Scale(FitConfig cfg, double k)
+        {
+            if (cfg == null || Math.Abs(k - 1) < 1e-12) return cfg;
+            FitConfig c = new FitConfig();
+            c.straight_block = cfg.straight_block;
+            c.length_param = cfg.length_param;
+            c.width_param = cfg.width_param;
+            c.fitting_block = cfg.fitting_block;
+            c.visibility_param = cfg.visibility_param;
+            c.layer = cfg.layer;
+            c.clearance = cfg.clearance * k;
+            c.tolerance = cfg.tolerance * k;
+            c.trim = cfg.trim;
+            c.unequal_t = cfg.unequal_t;
+            c.height_props = cfg.height_props;
+            c.thickness_props = cfg.thickness_props;
+            c.tray_label = cfg.tray_label;
+            c.fitting_labels = cfg.fitting_labels;
+            c.types = new Dictionary<string, FitType>();
+            if (cfg.types != null)
+                foreach (KeyValuePair<string, FitType> kv in cfg.types)
+                {
+                    FitType src = kv.Value;
+                    if (src == null) continue;
+                    c.types[kv.Key] = new FitType { state = src.state, w1 = src.w1, w2 = src.w2, flip = src.flip, leg = (src.leg ?? 60) * k };
+                }
+            return c;
+        }
+    }
+
     public class TavaCommands
     {
         [CommandMethod("AIDTAVA", CommandFlags.Modal | CommandFlags.UsePickSet | CommandFlags.Redraw)]
@@ -332,6 +533,9 @@ namespace CadAiDesigner
                 }
 
                 // 2) options loop. renkGrup != null means Renk/Tumu: one EN per color.
+                CizimBirimi.Sonuc bir = CizimBirimi.Resolve(db, ids, ts.birim);
+                CizimBirimi.Active = bir;
+                if (bir.Oto) ed.WriteMessage("\nBirim: " + bir.Ad + " (oto, " + bir.Not + ")\n");
                 bool autoEn = true;
                 bool standart = false;
                 bool renk = false;
@@ -342,8 +546,9 @@ namespace CadAiDesigner
                     bool eksen = string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
                     string msg = "\nEN=" + (eksen ? F(ts.en) + " (eksen, çift çizgi yok)" : (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en))) +
                                  ", Y=" + ts.yukseklik + ", t=" + ts.kalinlik + ", Mod=" + ts.mod + ", Bağlantı=" + (ts.baglanti ? "Evet" : "Hayir") +
+                                 ", Birim=" + bir.Prompt +
                                  (standart ? ", Standart=1..6 eksen" : (renkGrup != null ? ", Renk=tablo (" + renkGrup.Count + " renk)" : "")) +
-                                 "\n[En/Yukseklik/kaLinlik/kOpyala/Mod/eKsen/Renk/Tablo/Standart/Baglanti/Devam] <Devam>: ";
+                                 "\n[En/Yukseklik/kaLinlik/kOpyala/Mod/eKsen/Renk/Tablo/Standart/bIrim/Baglanti/Devam] <Devam>: ";
                     PromptKeywordOptions ko = new PromptKeywordOptions(msg) { AllowNone = true, AppendKeywordsToMessage = false };
                     ko.Keywords.Add("En", "En", "En");
                     ko.Keywords.Add("Yukseklik", "Yukseklik", "Yukseklik");
@@ -354,6 +559,7 @@ namespace CadAiDesigner
                     ko.Keywords.Add("Renk", "Renk", "Renk");
                     ko.Keywords.Add("Tablo", "Tablo", "Tablo");
                     ko.Keywords.Add("Standart", "Standart", "Standart");
+                    ko.Keywords.Add("Birim", "bIrim", "bIrim");
                     ko.Keywords.Add("Baglanti", "Baglanti", "Baglanti");
                     ko.Keywords.Add("Devam", "Devam", "Devam");
                     ko.Keywords.Default = "Devam";
@@ -451,6 +657,24 @@ namespace CadAiDesigner
                                 ts.Save();
                                 break;
                             }
+                        case "Birim":
+                            {
+                                string cur = CizimBirimi.Canon(ts.birim);
+                                PromptKeywordOptions uo = new PromptKeywordOptions("\nÇizim birimi [Oto/Mm/Cm/MEtre] <" + cur + ">: ") { AllowNone = true, AppendKeywordsToMessage = false };
+                                uo.Keywords.Add("Oto", "Oto", "Oto");
+                                uo.Keywords.Add("Mm", "MM", "MM");
+                                uo.Keywords.Add("Cm", "Cm", "Cm");
+                                uo.Keywords.Add("Metre", "mEtre", "mEtre");
+                                uo.Keywords.Default = cur;
+                                PromptResult r = ed.GetKeywords(uo);
+                                if (r.Status == PromptStatus.Cancel) return;
+                                if (r.Status == PromptStatus.OK) ts.birim = CizimBirimi.Canon(r.StringResult);
+                                ts.Save();
+                                bir = CizimBirimi.Resolve(db, ids, ts.birim);
+                                CizimBirimi.Active = bir;
+                                ed.WriteMessage("\nBirim: " + bir.Ad + (bir.Oto ? " (oto, " + bir.Not + ")" : "") + "\n");
+                                break;
+                            }
                         case "Baglanti":
                             {
                                 PromptKeywordOptions bo = new PromptKeywordOptions("\nArdından ek parçalar (AIDBAGLANTI) [Evet/Hayir] <" + (ts.baglanti ? "Evet" : "Hayir") + ">: ", "Evet Hayir") { AllowNone = true };
@@ -474,7 +698,7 @@ namespace CadAiDesigner
                     BlockTableRecord ms = (BlockTableRecord)tx.GetObject(SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
                     HashSet<ObjectId> before = new HashSet<ObjectId>(ms.Cast<ObjectId>());
 
-                    double unit = TavaGeo.UnitsPerMm(db.Insunits);
+                    double k = bir.K > 0 ? bir.K : 1;
                     bool eksen = standart || string.Equals(ts.mod, "Eksen", StringComparison.OrdinalIgnoreCase);
                     string buildMod = standart ? "Eksen" : ts.mod;
                     if (eksen && ts.en <= 0) ts.en = 300;
@@ -493,8 +717,9 @@ namespace CadAiDesigner
                             foreach (BlockAlong.Seg s in BlockAlong.Segments(tx, e)) { if (s.Arc) arcs++; lines.Add(new TavaGeo.Line2(new Point2d(s.S.X, s.S.Y), new Point2d(s.E.X, s.E.Y), w)); }
                         }
                         int p = 0, sng = 0, ign = 0;
-                        double useEn = forceEn ? g.En : ts.en;
-                        List<TavaGeo.Center> part = TavaGeo.Build(lines, buildMod, useEn, unit, out p, out sng, out ign);
+                        double useEnMm = forceEn ? g.En : ts.en;
+                        double useEn = useEnMm * k;
+                        List<TavaGeo.Center> part = TavaGeo.Build(lines, buildMod, useEn, k, out p, out sng, out ign);
                         foreach (TavaGeo.Center c in part)
                         {
                             if (forceEn || eksen || !autoEn) c.En = useEn;
@@ -505,7 +730,7 @@ namespace CadAiDesigner
                     }
 
                     // existing trays (duplicate check). Item4 = placed in this Eksen run (only exact overlaps count).
-                    double axisTol = Math.Max(unit, 1e-4);
+                    double axisTol = Math.Max(k, 1e-4);
                     List<Tuple<Point2d, Point2d, double, bool>> have = new List<Tuple<Point2d, Point2d, double, bool>>();
                     foreach (ObjectId id in ms)
                     {
@@ -526,7 +751,7 @@ namespace CadAiDesigner
                             if (g != null && g.Ad != null && !renkAdet.ContainsKey(g.Ad)) renkAdet[g.Ad] = 0;
                     foreach (TavaGeo.Center c in cl)
                     {
-                        if (c.S.GetDistanceTo(c.E) < 1) continue;
+                        if (c.S.GetDistanceTo(c.E) < Math.Max(k, 1e-6)) continue;
                         if (have.Any(h => TavaGeo.Covered(c.S, c.E, h.Item1, h.Item2, (eksen && h.Item4) ? axisTol : Math.Max(h.Item3, c.En) / 2))) { dups++; continue; }
                         Vector2d u = (c.E - c.S).GetNormal(); Vector2d n = new Vector2d(-u.Y, u.X);
                         bool axis = eksen || renk;
@@ -535,12 +760,14 @@ namespace CadAiDesigner
                         BlockReference br = new BlockReference(new Point3d(p.X, p.Y, 0), btrId);
                         br.SetDatabaseDefaults(db);
                         br.Rotation = Math.Atan2(u.Y, u.X);
+                        br.ScaleFactors = new Scale3d(k, k, k);
                         br.Layer = layer;
                         ms.AppendEntity(br); tx.AddNewlyCreatedDBObject(br, true);
                         Executor.AddAttributes(tx, br);
                         List<string> notes = new List<string>();
-                        SetNum(br, cfg.length_param, c.S.GetDistanceTo(c.E), res.Notes);
-                        SetNum(br, cfg.width_param, c.En, res.Notes);
+                        double toMm = 1.0 / k;
+                        SetNum(br, cfg.length_param, c.S.GetDistanceTo(c.E) * toMm, res.Notes);
+                        SetNum(br, cfg.width_param, c.En * toMm, res.Notes);
                         SetAttr(tx, br, cfg.height_props, ts.yukseklik);
                         SetAttr(tx, br, cfg.thickness_props, ts.kalinlik);
                         BlockAlong.RefreshHatches(tx, br);
@@ -615,6 +842,7 @@ namespace CadAiDesigner
                 ed.WriteMessage("\nTava hatası: " + ex.Message + "\n");
                 Metraj.Raise("Tava hatası: " + ex.Message);
             }
+            finally { CizimBirimi.Active = null; }
         }
 
         static Extents3d Grow(Extents3d e, double d) { return new Extents3d(new Point3d(e.MinPoint.X - d, e.MinPoint.Y - d, 0), new Point3d(e.MaxPoint.X + d, e.MaxPoint.Y + d, 0)); }
