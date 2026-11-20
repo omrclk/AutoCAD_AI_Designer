@@ -764,7 +764,8 @@ namespace CadAiDesigner
                 FitConfig cfg = FitConfig.Load();
                 CizimBirimi.Sonuc bir = CizimBirimi.Resolve(doc.Database, null, TavaSettings.Load().birim);
                 CizimBirimi.Active = bir;
-                ed.WriteMessage("\nBirim: " + bir.Ad + (bir.Oto ? " (oto, " + bir.Not + ")" : "") + "\n");
+                ed.WriteMessage("\n" + bir.Metin + "\n");
+                AppLog.Write("BIRIM " + bir.Metin + (string.IsNullOrEmpty(bir.Skor) ? "" : " | " + bir.Skor));
                 List<ObjectId> ids = null;
                 PromptSelectionResult sr = ed.SelectImplied();
                 if (sr.Status != PromptStatus.OK)

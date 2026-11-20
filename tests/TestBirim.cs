@@ -6,7 +6,7 @@ class TestBirim
     static int Main()
     {
         BirimOlcu.Check();
-        Console.WriteLine("BirimOlcu OK: Cm 300 mm -> width 30, scale 0.1, boy 500 -> 5000 mm, centre 15");
+        Console.WriteLine("BirimOlcu OK: scale check, cm/mm/m plans, ambiguous fallback");
         return 0;
     }
 }
