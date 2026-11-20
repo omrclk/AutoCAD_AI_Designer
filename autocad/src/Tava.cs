@@ -342,8 +342,8 @@ namespace CadAiDesigner
                     string msg = "\nEN=" + (eksen ? F(ts.en) + " (eksen, çift çizgi yok)" : (autoEn ? "otomatik (çift çizgi aralığı/polyline kalınlığı, yoksa " + F(ts.en) + ")" : F(ts.en))) +
                                  ", Y=" + ts.yukseklik + ", t=" + ts.kalinlik + ", Mod=" + ts.mod + ", Bağlantı=" + (ts.baglanti ? "Evet" : "Hayir") +
                                  (standart ? ", Standart=1..6 eksen" : (renkGrup != null ? ", Renk=tablo (" + renkGrup.Count + " renk)" : "")) +
-                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Renk/RenkTablosu/Standart/Baglanti/Devam] <Devam>: ";
-                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Renk RenkTablosu Standart Baglanti Devam") { AllowNone = true };
+                                 "\n[En/Yukseklik/Kalinlik/Kopyala/Mod/Eksen/Renk/Tablo/Standart/Baglanti/Devam] <Devam>: ";
+                    PromptKeywordOptions ko = new PromptKeywordOptions(msg, "En Yukseklik Kalinlik Kopyala Mod Eksen Renk Tablo Standart Baglanti Devam") { AllowNone = true };
                     PromptResult kr = ed.GetKeywords(ko);
                     if (kr.Status == PromptStatus.Cancel) return;
                     if (kr.Status == PromptStatus.None || kr.StringResult == "Devam") break;
@@ -430,7 +430,7 @@ namespace CadAiDesigner
                                 ed.WriteMessage("\n" + sec.Ozet + "\n");
                                 break;
                             }
-                        case "RenkTablosu":
+                        case "Tablo":
                             {
                                 RenkTablosuDuzenle(ed, ts);
                                 ts.Save();
