@@ -301,10 +301,17 @@ namespace CadAiDesigner
                     TrayRun ra = runs[arms[0].Item1], rb = runs[arms[1].Item1];
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     short flip = (short)(Rot(-1, 0, r).DotProduct(b) > 0 ? 1 : 0);
-                    plan.Notes.Add("Düğüm " + Pt(C) + ": YD");
-                    pl = new Placement { Type = "YD", P = C - b * (ra.W / 2) + a * (cfg.clearance + rb.W / 2), Rot = r, Flip = flip, W1 = ra.W, W2 = rb.W, Layer = layer };
-                    AddCut(ra, arms[0].Item2, a, C, Reach(cfg, "YD") + rb.W / 2);
-                    AddCut(rb, arms[1].Item2, b, C, Reach(cfg, "YD") + ra.W / 2);
+                    double na = ra.W, nb = rb.W, yd = Math.Min(na, nb);
+                    bool mixedYd = Math.Abs(na - nb) > 1.0;
+                    // Mixed corner is a stock elbow of the narrow width (200/300 -> YD 200). Both centre lines stay on the elbow axes and stop at its faces.
+                    if (mixedYd)
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YD " + W(yd) + " (kollar " + W(yd) + "/" + W(Math.Max(na, nb)) + ", karisik YD yok)");
+                    else
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": YD");
+                    double legA = mixedYd ? yd : na, legB = mixedYd ? yd : nb;
+                    pl = new Placement { Type = "YD", P = C - b * (legA / 2) + a * (cfg.clearance + legB / 2), Rot = r, Flip = flip, W1 = yd, W2 = yd, Layer = layer };
+                    AddCut(ra, arms[0].Item2, a, C, Reach(cfg, "YD") + legB / 2);
+                    AddCut(rb, arms[1].Item2, b, C, Reach(cfg, "YD") + legA / 2);
                 }
                 else if (arms.Count == 3)
                 {
@@ -317,8 +324,9 @@ namespace CadAiDesigner
                     if (bi < 0 || Math.Abs(arms[bi].Item3.DotProduct(arms[(bi + 1) % 3].Item3)) > 0.1) { plan.Notes.Add("Açılı/düzensiz birleşim " + Pt(C) + ": otomatik parça yok."); continue; }
                     Tuple<int, int, Vector3d> br = arms[bi], m1 = arms[(bi + 1) % 3], m2 = arms[(bi + 2) % 3];
                     TrayRun rb = runs[br.Item1];
-                    double wm = Math.Max(runs[m1.Item1].W, runs[m2.Item1].W), wb = rb.W;
-                    if (Math.Abs(runs[m1.Item1].W - runs[m2.Item1].W) > 0.5) plan.Notes.Add("T " + Pt(C) + ": ana hattın iki tarafı farklı genişlikte (" + W(runs[m1.Item1].W) + "/" + W(runs[m2.Item1].W) + ").");
+                    double w1m = runs[m1.Item1].W, w2m = runs[m2.Item1].W;
+                    double wm = Math.Max(w1m, w2m), wb = rb.W;
+                    bool mainMixed = Math.Abs(w1m - w2m) > 1.0;
                     Vector3d a = br.Item3;
                     double r = Math.Atan2(a.Y, a.X) + Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
@@ -326,9 +334,13 @@ namespace CadAiDesigner
                     double tHere, sHere, mateOff = 0; Point3d hitAt;
                     bool offsetMate = TryHit(mainRun, rb, tol, out tHere, out sHere, out hitAt)
                         && OffsetOpposite(runs, mainRun, rb, tHere, SameAxis, out mateOff);
-                    string type = offsetMate ? "YARIM_T" : (Math.Abs(wb - wm) <= 0.5 ? "YT" : (cfg.unequal_t ?? "YARIM_T").ToUpperInvariant());
-                    plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff) + " > " + W(SameAxis) : ", tek taraf"));
-                    pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = wm, Layer = layer };
+                    // Full YT only when the branch and both main arms are the same width. Otherwise one half tee at the branch width.
+                    string type = (!offsetMate && !mainMixed && Math.Abs(wb - wm) <= 1.0) ? "YT" : "YARIM_T";
+                    if (mainMixed)
+                        plan.Notes.Add("Dugum " + Pt(C) + ": YARIM_T " + W(wb) + " (ana " + W(Math.Min(w1m, w2m)) + "/" + W(Math.Max(w1m, w2m)) + ", karisik YT yok)");
+                    else
+                        plan.Notes.Add("Düğüm " + Pt(C) + ": " + type + (offsetMate ? ", karşı kol kayması " + W(mateOff) + " > " + W(SameAxis) : ", tek taraf"));
+                    pl = new Placement { Type = type, P = C - lx * (wb / 2) + a * (cfg.clearance + wm / 2), Rot = r, W1 = wb, W2 = type == "YT" ? wb : wm, Layer = layer };
                     AddCut(rb, br.Item2, a, C, Reach(cfg, type) + wm / 2);
                     if (type != "YT")
                     {
@@ -369,12 +381,12 @@ namespace CadAiDesigner
                     double wu1 = runs[arms[0].Item1].W, wu2 = runs[arms[opp].Item1].W, wv1 = runs[arms[others[0]].Item1].W, wv2 = runs[arms[others[1]].Item1].W;
                     double wMin = Math.Min(Math.Min(wu1, wu2), Math.Min(wv1, wv2));
                     double wMax = Math.Max(Math.Max(wu1, wu2), Math.Max(wv1, wv2));
-                    // Stock AD is four equal legs. A mixed cross (300 main, two opposite 100s) is two half tees; the wider pair is not cut.
+                    // Stock AD is four equal legs. Otherwise the pair that contains the widest arm stays continuous (600 main, 400 above and 100 below -> two half tees).
                     if (wMax - wMin > 1.0)
                     {
                         double minA = Math.Min(wu1, wu2), maxA = Math.Max(wu1, wu2);
                         double minB = Math.Min(wv1, wv2), maxB = Math.Max(wv1, wv2);
-                        bool mainIsA = minA > minB || (Math.Abs(minA - minB) <= 1.0 && maxA >= maxB);
+                        bool mainIsA = maxA > maxB || (Math.Abs(maxA - maxB) <= 1.0 && minA >= minB);
                         int m0 = mainIsA ? 0 : others[0];
                         int m1i = mainIsA ? opp : others[1];
                         int b0 = mainIsA ? others[0] : 0;
@@ -384,14 +396,14 @@ namespace CadAiDesigner
                         PlaceHalf(plan, cfg, existing, tol, runs, arms[b1], arms[m0], arms[m1i], layer);
                         continue;
                     }
-                    double w1 = Math.Max(wu1, wu2), w2 = Math.Max(wv1, wv2);
+                    double wAd = wMax;
                     double r = Math.Atan2(u.Y, u.X) - Math.PI / 2;
                     Vector3d lx = Rot(1, 0, r);
                     plan.Notes.Add("Düğüm " + Pt(C) + ": AD, eksen kayması " + W(Math.Max(offA, offB)));
-                    pl = new Placement { Type = "AD", P = C - lx * (w1 / 2) - u * (cfg.clearance + w2 / 2), Rot = r, W1 = w1, W2 = w2, Layer = layer };
-                    AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + w2 / 2);
-                    AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + w2 / 2);
-                    foreach (int k in others) AddCut(runs[arms[k].Item1], arms[k].Item2, arms[k].Item3, C, Reach(cfg, "AD") + w1 / 2);
+                    pl = new Placement { Type = "AD", P = C - lx * (wAd / 2) - u * (cfg.clearance + wAd / 2), Rot = r, W1 = wAd, W2 = wAd, Layer = layer };
+                    AddCut(runs[arms[0].Item1], arms[0].Item2, arms[0].Item3, C, Reach(cfg, "AD") + wAd / 2);
+                    AddCut(runs[arms[opp].Item1], arms[opp].Item2, arms[opp].Item3, C, Reach(cfg, "AD") + wAd / 2);
+                    foreach (int k in others) AddCut(runs[arms[k].Item1], arms[k].Item2, arms[k].Item3, C, Reach(cfg, "AD") + wAd / 2);
                 }
                 else { plan.Notes.Add("Tanınmayan birleşim " + Pt(C) + " (" + arms.Count + " kol)."); continue; }
 
