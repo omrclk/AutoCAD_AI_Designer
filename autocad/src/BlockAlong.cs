@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -15,41 +16,153 @@ namespace CadAiDesigner
     {
         internal struct Seg { public Point3d S, E; public bool Arc; public double Len { get { return S.DistanceTo(E); } } }
 
+        /// <summary>Repeated first/last vertex, or a zero-length spike, closer than this is the same point.</summary>
+        const double VertexTol = 1e-6;
+
         static readonly string[] LengthNames = { "Length", "Uzunluk", "Boy", "L", "Distance", "Distance1", "Mesafe", "Len", "Lenght" };
         static readonly string[] WidthNames = { "Width", "Genislik", "Genişlik", "En", "W", "Distance2", "Tava Genişliği", "Genislik1" };
 
+        /// <summary>Straight chords of a line or polyline. A closed polyline (Closed flag, with or without a
+        /// duplicated last vertex) includes the edge from the last vertex back to the first.</summary>
         public static List<Seg> Segments(Transaction tx, Entity ent)
         {
             List<Seg> r = new List<Seg>();
             Polyline pl = ent as Polyline;
-            if (pl != null)
-            {
-                int n = pl.Closed ? pl.NumberOfVertices : pl.NumberOfVertices - 1;
-                for (int i = 0; i < n; i++)
-                {
-                    SegmentType st = pl.GetSegmentType(i);
-                    if (st == SegmentType.Line) { LineSegment3d ls = pl.GetLineSegmentAt(i); r.Add(new Seg { S = ls.StartPoint, E = ls.EndPoint }); }
-                    else if (st == SegmentType.Arc) { CircularArc3d a = pl.GetArcSegmentAt(i); r.Add(new Seg { S = a.StartPoint, E = a.EndPoint, Arc = true }); }
-                }
-            }
+            if (pl != null) AddLw(pl, r);
             else if (ent is Line)
             {
                 Line l = (Line)ent; r.Add(new Seg { S = l.StartPoint, E = l.EndPoint });
             }
-            else if (ent is Polyline2d || ent is Polyline3d)
-            {
-                Curve c = (Curve)ent;
-                int end = (int)Math.Round(c.EndParam);
-                for (int i = 0; i < end; i++)
-                {
-                    Point3d s = c.GetPointAtParameter(i), e = c.GetPointAtParameter(i + 1);
-                    bool arc = false;
-                    try { arc = Math.Abs(c.GetDistanceAtParameter(i + 1) - c.GetDistanceAtParameter(i) - s.DistanceTo(e)) > 1e-6 * Math.Max(1, s.DistanceTo(e)); } catch (System.Exception) { }
-                    r.Add(new Seg { S = s, E = e, Arc = arc });
-                }
-            }
+            else if (ent is Polyline2d || ent is Polyline3d) AddVertexPoly(tx, ent, r);
             else throw new InvalidOperationException("Hedef polyline/çizgi değil: " + ent.GetType().Name + " " + ent.Handle);
             return r.Where(s => s.Len > 1e-9).ToList();
+        }
+
+        /// <summary>LWPolyline via Closed / NumberOfVertices / GetPoint3dAt / GetBulgeAt.
+        /// GetSegmentType and GetLineSegmentAt are not used: on a closed polyline the closing index is not a reliable segment.</summary>
+        static void AddLw(Polyline pl, List<Seg> r)
+        {
+            List<Point3d> pts = new List<Point3d>();
+            List<bool> arcs = new List<bool>();
+            int nv = 0;
+            try { nv = pl.NumberOfVertices; } catch (System.Exception) { }
+            for (int i = 0; i < nv; i++)
+            {
+                Point3d p;
+                try { p = pl.GetPoint3dAt(i); }
+                catch (System.Exception) { break; }
+                bool arc = false;
+                try { arc = Math.Abs(pl.GetBulgeAt(i)) > 1e-12; } catch (System.Exception) { }
+                Push(pts, arcs, p, arc);
+            }
+            bool closed = false;
+            try { closed = pl.Closed; } catch (System.Exception) { }
+            AddChain(r, pts, arcs, closed);
+        }
+
+        /// <summary>Polyline2d / Polyline3d from vertex positions (fit vertices when spline-fitted).
+        /// EndParam does not always span the closing edge, so the close is added from the Closed flag.</summary>
+        static void AddVertexPoly(Transaction tx, Entity ent, List<Seg> r)
+        {
+            Curve curve = ent as Curve;
+            bool closed = false;
+            try { if (curve != null && curve.Closed) closed = true; } catch (System.Exception) { }
+            List<Point3d> pts = new List<Point3d>();
+            List<bool> arcs = new List<bool>();
+            List<Point3d> fit = new List<Point3d>();
+            List<bool> fitArcs = new List<bool>();
+            bool spline = false;
+            try
+            {
+                foreach (object item in (IEnumerable)ent)
+                {
+                    if (!(item is ObjectId)) continue;
+                    ObjectId id = (ObjectId)item;
+                    if (id.IsNull) continue;
+                    DBObject o = tx.GetObject(id, OpenMode.ForRead);
+                    Vertex2d v2 = o as Vertex2d;
+                    if (v2 != null)
+                    {
+                        bool arc = false;
+                        try { arc = Math.Abs(v2.Bulge) > 1e-12; } catch (System.Exception) { }
+                        if (v2.VertexType == Vertex2dType.SplineControlVertex) { spline = true; continue; }
+                        if (v2.VertexType == Vertex2dType.SplineFitVertex) { spline = true; Push(fit, fitArcs, v2.Position, arc); continue; }
+                        Push(pts, arcs, v2.Position, arc);
+                        continue;
+                    }
+                    PolylineVertex3d v3 = o as PolylineVertex3d;
+                    if (v3 == null) continue;
+                    if (v3.VertexType == Vertex3dType.ControlVertex) { spline = true; continue; }
+                    if (v3.VertexType == Vertex3dType.FitVertex) { spline = true; Push(fit, fitArcs, v3.Position, false); continue; }
+                    Push(pts, arcs, v3.Position, false);
+                }
+            }
+            catch (System.Exception) { pts.Clear(); fit.Clear(); spline = false; }
+            if (spline && fit.Count >= 2) { pts = fit; arcs = fitArcs; }
+            if (pts.Count >= 2) { AddChain(r, pts, arcs, closed); return; }
+            if (curve != null) AddByParam(curve, r, closed);
+        }
+
+        static void AddByParam(Curve c, List<Seg> r, bool closed)
+        {
+            double sp, ep;
+            try { sp = c.StartParam; ep = c.EndParam; } catch (System.Exception) { return; }
+            int n = (int)Math.Round(ep - sp);
+            if (n < 1) return;
+            List<Point3d> pts = new List<Point3d>();
+            List<bool> arcs = new List<bool>();
+            for (int i = 0; i <= n; i++)
+            {
+                Point3d p;
+                try { p = c.GetPointAtParameter(sp + i); }
+                catch (System.Exception) { break; }
+                bool arc = false;
+                if (i < n)
+                {
+                    try
+                    {
+                        Point3d q = c.GetPointAtParameter(sp + i + 1);
+                        double chord = p.DistanceTo(q);
+                        arc = chord > 1e-9 && Math.Abs(c.GetDistanceAtParameter(sp + i + 1) - c.GetDistanceAtParameter(sp + i) - chord) > 1e-6 * Math.Max(1, chord);
+                    }
+                    catch (System.Exception) { }
+                }
+                Push(pts, arcs, p, arc);
+            }
+            try { if (c.Closed) closed = true; } catch (System.Exception) { }
+            AddChain(r, pts, arcs, closed);
+        }
+
+        static void Push(List<Point3d> pts, List<bool> arcs, Point3d p, bool arc)
+        {
+            if (pts.Count > 0 && pts[pts.Count - 1].DistanceTo(p) <= VertexTol)
+            {
+                arcs[arcs.Count - 1] = arc;
+                return;
+            }
+            pts.Add(p);
+            arcs.Add(arc);
+        }
+
+        /// <summary>Emits one chord per edge. When <paramref name="closed"/> is set, or the last vertex repeats the first,
+        /// the return edge is included.</summary>
+        static void AddChain(List<Seg> r, List<Point3d> pts, List<bool> arcs, bool closed)
+        {
+            if (pts.Count >= 2 && pts[0].DistanceTo(pts[pts.Count - 1]) <= VertexTol)
+            {
+                pts.RemoveAt(pts.Count - 1);
+                if (arcs.Count > pts.Count) arcs.RemoveAt(arcs.Count - 1);
+                closed = true;
+            }
+            if (pts.Count < 2) return;
+            bool close = closed && pts.Count >= 3;
+            int n = close ? pts.Count : pts.Count - 1;
+            for (int i = 0; i < n; i++)
+            {
+                int j = close ? (i + 1) % pts.Count : i + 1;
+                bool arc = i < arcs.Count && arcs[i];
+                r.Add(new Seg { S = pts[i], E = pts[j], Arc = arc });
+            }
         }
 
         /// <summary>X/Y size of a block definition (union of entity extents), relative to its base point.</summary>

@@ -20,6 +20,7 @@ namespace CadAiDesigner
         readonly Button btnSelect = new Button(), btnAsk = new Button(), btnApply = new Button(),
                         btnCancel = new Button(), btnNew = new Button(), btnSettings = new Button(), btnMetraj = new Button(), btnFit = new Button(), btnAtt = new Button(), btnTava = new Button(), btnPk = new Button(), btnRef = new Button(), btnOlcu = new Button(), btnAttImp = new Button(), btnMl = new Button(), btnMlKop = new Button(), btnArm = new Button(), btnAyd = new Button(), btnOda = new Button(), btnOSinir = new Button();
         readonly JavaScriptSerializer js = new JavaScriptSerializer { MaxJsonLength = 8000000, RecursionLimit = 40 };
+        readonly ToolTip tips = new ToolTip();
         string session = Guid.NewGuid().ToString("N");
         bool busy, warnedSel;
 
@@ -61,7 +62,8 @@ namespace CadAiDesigner
             Setup(btnNew, "Yeni sohbet", (s, e) => NewChat());
             Setup(btnSettings, "Ayarlar", (s, e) => OpenSettings());
             Setup(btnFit, "Ek parçalar", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Ek parçalar: tavaları seçin veya Enter (tümü), sonra komut satırında onaylayın."); d.SendStringToExecute("AIDBAGLANTI ", true, false, false); } });
-            Setup(btnTava, "Tava Yerleştir", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Tava Yerleştir: plan çizgilerini seçin veya Tumu, sonra komut satırında seçenekleri onaylayın (Enter = Devam)."); d.SendStringToExecute("AIDTAVA ", true, false, false); } });
+            Setup(btnTava, "Tava Yerleştir", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Tava Yerleştir: çizgileri seçin veya Tumu, Enter = son ayar. Eksen: tava ekseni. Renk: katman yok sayılır, görünen renk (ByLayer = katman rengi) tüm katmanlarda; Enter = tüm alan, Pencere = pencere. Tumu: seçimdeki her renk, Tablo (renk tablosu) EN'i. Standart: 1=100, 2=200, 3=300, 4=400, 5=500, 6=600, eksen, diğer renkler atlanır. bIrim: Oto/Mm/Cm/Metre."); d.SendStringToExecute("AIDTAVA ", true, false, false); } });
+            tips.SetToolTip(btnTava, "Renk: görünen renk, tüm katmanlar. ByLayer katman rengine çözülür. Tumu: her renk Tablo (renk tablosu) EN'i. Enter = tüm alan. Standart: 1=100, 2=200, 3=300, 4=400, 5=500, 6=600. bIrim Oto: seçilen çizgilerin boyundan Mm/Cm/Metre tahmin edilir; elle seçim tahmini ezer.");
             Setup(btnPk, "Plandan Keşif", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Plandan keşif: plan çizgilerini seçin veya Tumu, sonra Enter (çizim değişmez)."); d.SendStringToExecute("AIDPLANKESIF ", true, false, false); } });
             Setup(btnRef, "Referans noktaları", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Referans noktaları: önce kaynak plandan bir nokta, sonra hedef plandaki AYNI noktayı fareyle (osnap) seçin. İkinci çift dönme/ölçek için isteğe bağlıdır."); d.SendStringToExecute("AIDREFNOKTA ", true, false, false); } });
             Setup(btnOlcu, "Blok ölçüsü", (s, e) => { Document d = AcadApp.DocumentManager.MdiActiveDocument; if (d != null) { Log("Blok ölçüsü: blokları seçin (pencere), Enter; sonra ölçü çizgisinin tarafını tıklayın (Enter = varsayılan). Ardışık ölçüler blok merkezlerinden yapılır."); d.SendStringToExecute("AIDOLCU ", true, false, false); } });
@@ -123,6 +125,7 @@ namespace CadAiDesigner
                     foreach (Document d in AcadApp.DocumentManager) d.ImpliedSelectionChanged -= OnImpliedSelectionChanged;
                 }
                 catch (System.Exception) { }
+                try { tips.Dispose(); } catch (System.Exception) { }
             }
             base.Dispose(disposing);
         }

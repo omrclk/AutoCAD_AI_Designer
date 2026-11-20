@@ -42,6 +42,7 @@
     <Compile Include="src\Armatur.cs" />
     <Compile Include="src\Aydinlatma.cs" />
     <Compile Include="src\OdaSayim.cs" />
+    <Compile Include="src\BirimOlcu.cs" />
     <Compile Include="src\Tava.cs" />
     <Compile Include="src\HatchDiag.cs" />
     <Compile Include="src\RefPoints.cs" />
